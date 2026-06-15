@@ -79,6 +79,34 @@ def tesseract_backend(image_path: Path) -> str:
     return out.stdout
 
 
+# ---- easyocr backend (GPU; tesseract unavailable without sudo on this box) ----
+_EASYOCR_READER = None
+
+
+def _get_easyocr():
+    global _EASYOCR_READER
+    if _EASYOCR_READER is None:
+        import easyocr  # heavy import; deferred
+        _EASYOCR_READER = easyocr.Reader(["en"], gpu=True, verbose=False)
+    return _EASYOCR_READER
+
+
+def easyocr_boxes(image_path: Path) -> list[tuple]:
+    """Return positioned OCR boxes [(x, y, text, conf)] for layout-aware parsing."""
+    reader = _get_easyocr()
+    out = []
+    for bbox, text, conf in reader.readtext(str(image_path), detail=1, paragraph=False):
+        x = float(min(p[0] for p in bbox)); y = float(min(p[1] for p in bbox))
+        out.append((x, y, text, float(conf)))
+    return out
+
+
+def easyocr_backend(image_path: Path) -> str:
+    """Flattened reading-order text (for the regex path / debugging)."""
+    boxes = sorted(easyocr_boxes(image_path), key=lambda b: (round(b[1] / 15), b[0]))
+    return "\n".join(b[2] for b in boxes)
+
+
 def _rasterize(pdf_path: Path, dpi: int = 200) -> list[Path]:
     """Rasterize a PDF to PNG page images via poppler's pdftoppm (present on this box)."""
     if not shutil.which("pdftoppm"):
@@ -90,7 +118,129 @@ def _rasterize(pdf_path: Path, dpi: int = 200) -> list[Path]:
     return sorted(tmp.glob(f"{pdf_path.stem}*.png"))
 
 
-# ---- regex extraction ------------------------------------------------------
+# ---- layout-aware extraction from positioned OCR boxes ---------------------
+# NJDOT logs are descriptive (e.g. "moist, m.-f. SAND, some silt, [FILL]"), not clean USCS
+# codes, so we map the dominant soil noun + modifier to a coarse USCS group. Approximate by
+# construction — confidence reflects that. Honest: this is a description->USCS heuristic.
+_RE_PRIMARY_SOIL = re.compile(r"\b(GRAVEL|SAND|SILT|CLAY|PEAT|TOPSOIL|FILL)\b")
+_RE_ELEV = re.compile(r"SURFACE\s+ELEVATION\s*[:.]?\s*(-?\d{1,4}(?:\.\d+)?)\s*(m|ft|meters|feet)?",
+                      re.IGNORECASE)
+_RE_SAMPLE_ID = re.compile(r"\b([SU]-?\d{1,2}|SS-?\d{1,2}|ST-?\d{1,2})\b")
+_RE_LEFT_NUM = re.compile(r"^[~\-−]?\s*(\d{1,3})$")
+
+
+def soil_family_from_text(desc: str) -> tuple[Optional[str], float]:
+    """Map a descriptive soil phrase to a coarse USCS group symbol + a confidence in [0,1]."""
+    up = desc.upper()
+    if "FILL" in up:
+        return "FILL", 0.6
+    if "PEAT" in up or "ORGANIC" in up:
+        return "PT", 0.5
+    if "TOPSOIL" in up:
+        return "OL", 0.5
+    m = _RE_PRIMARY_SOIL.search(up)
+    if not m:
+        return None, 0.0
+    primary = m.group(1)
+    silty = "SILT" in up or "SILTY" in up
+    clayey = "CLAY" in up or "CLAYEY" in up
+    if primary == "SAND":
+        return ("SM" if silty else "SC" if clayey else "SP"), 0.45
+    if primary == "GRAVEL":
+        return ("GM" if silty else "GC" if clayey else "GP"), 0.45
+    if primary == "SILT":
+        return "ML", 0.45
+    if primary == "CLAY":
+        return "CH" if "FAT" in up or "HIGH PLAST" in up else "CL", 0.45
+    return None, 0.0
+
+
+def extract_header_fields(boxes: list[tuple], flat_text: str) -> dict:
+    """Surface elevation + groundwater depth from the header / water-levels area."""
+    out = {"surface_elevation": None, "elev_units": None, "gw_depth": None}
+    m = _RE_ELEV.search(flat_text)
+    if m:
+        try:
+            out["surface_elevation"] = float(m.group(1))
+            out["elev_units"] = (m.group(2) or "").lower() or None
+        except ValueError:
+            pass
+    gw = _RE_GW.search(flat_text)
+    if gw:
+        try:
+            out["gw_depth"] = float(gw.group(1))
+        except ValueError:
+            pass
+    return out
+
+
+def _depth_axis(boxes: list[tuple], page_w: float):
+    """Fit depth = a*y + b from the left-margin numeric tick boxes. Returns (a, b) or None."""
+    import numpy as np
+    pts = []
+    for x, y, text, conf in boxes:
+        if x < 0.13 * page_w:
+            mm = _RE_LEFT_NUM.match(text.strip())
+            if mm:
+                v = int(mm.group(1))
+                if 0 <= v < 300:
+                    pts.append((y, v))
+    if len(pts) < 3:
+        return None
+    pts.sort()
+    ys = np.array([p[0] for p in pts], float)
+    vs = np.array([p[1] for p in pts], float)
+    # robust-ish: require monotone increase of depth with y
+    if not (vs[-1] > vs[0]):
+        return None
+    a, b = np.polyfit(ys, vs, 1)
+    if a <= 0:
+        return None
+    return float(a), float(b)
+
+
+def parse_boxes_to_strata(boxes: list[tuple], page_w: float, page_h: float) -> list[StrataRow]:
+    """Layout-aware extraction: associate description rows with interpolated depths + soil class.
+
+    Honest scope: yields one StrataRow per OCR'd description line that carries a soil keyword,
+    with a depth from the calibrated left-axis. USCS is a description heuristic; SPT-N is parsed
+    only where explicit blow triplets appear. Many rows will have partial fields — that is real.
+    """
+    flat = "\n".join(b[2] for b in sorted(boxes, key=lambda b: (round(b[1] / 15), b[0])))
+    header = extract_header_fields(boxes, flat)
+    axis = _depth_axis(boxes, page_w)
+    # description column = right portion of the page (observed x>~0.42*width for the desc text)
+    desc_boxes = [(x, y, t, c) for (x, y, t, c) in boxes if x > 0.42 * page_w and len(t) > 8]
+    desc_boxes.sort(key=lambda b: b[1])
+    rows: list[StrataRow] = []
+    idx = 0
+    for x, y, text, conf in desc_boxes:
+        fam, fam_conf = soil_family_from_text(text)
+        if fam is None:
+            continue
+        depth = (axis[0] * y + axis[1]) if axis else None
+        spt = None
+        sm = _RE_SPT.search(text)
+        if sm:
+            spt = int(sm.group(2)) + int(sm.group(3))
+        rows.append(StrataRow(
+            interval_index=idx,
+            top_depth=round(depth, 2) if depth is not None else None,
+            bottom_depth=None,
+            uscs_class=fam, spt_n=spt, sample_type=None,
+            gw_depth=header["gw_depth"], elevation=header["surface_elevation"],
+            source="ocr", ocr_status="parsed",
+            confidence=round(min(1.0, 0.4 * conf + 0.6 * fam_conf), 2),
+        ))
+        idx += 1
+    # fill bottom_depth from the next row's top (intervals are contiguous on a log)
+    for i in range(len(rows) - 1):
+        if rows[i].top_depth is not None and rows[i + 1].top_depth is not None:
+            rows[i].bottom_depth = rows[i + 1].top_depth
+    return rows
+
+
+# ---- regex extraction (vector-text path / synthetic examples) --------------
 def parse_text_to_strata(text: str, source: str = "pdfplumber") -> list[StrataRow]:
     """Heuristic line-by-line extraction. Preliminary; accuracy is a TODO.
 
@@ -166,6 +316,30 @@ def extract_from_pdf(pdf_path: Path, boring_id: str,
                        note="OCR produced no strata pattern (TODO: accuracy)")
 
 
+def extract_with_easyocr(pdf_path: Path, boring_id: str) -> ParseResult:
+    """Rasterize + easyocr + layout-aware parse. Coarse soil-class + elevation/GW; depth/SPT
+    are sparse (descriptive scanned logs). Status 'parsed' iff ≥1 soil row recovered."""
+    from PIL import Image
+    try:
+        images = _rasterize(pdf_path, dpi=300)
+    except Exception as exc:  # noqa: BLE001
+        return ParseResult(boring_id, status="failed", note=f"rasterize: {exc}")
+    all_rows: list[StrataRow] = []
+    try:
+        for img in images:
+            boxes = easyocr_boxes(img)
+            w, h = Image.open(img).size
+            all_rows.extend(parse_boxes_to_strata(boxes, w, h))
+    except Exception as exc:  # noqa: BLE001
+        return ParseResult(boring_id, status="failed", note=f"easyocr: {exc}")
+    for i, r in enumerate(all_rows):
+        r.interval_index = i
+    if all_rows:
+        return ParseResult(boring_id, rows=all_rows, status="parsed", source="ocr")
+    return ParseResult(boring_id, status="pending", source="ocr",
+                       note="OCR produced no soil rows")
+
+
 # ---- DB plumbing -----------------------------------------------------------
 def _insert_rows(con, boring_id: str, rows: list[StrataRow]) -> None:
     con.execute("BEGIN")
@@ -202,12 +376,18 @@ def run(config: Config, log, ocr: bool = False, limit: Optional[int] = None) -> 
         log.warning("no_logs", note="data/logs/ is empty; run `--phase 3 --download-logs` first")
         return {"pdfs": 0, "parsed": 0, "pending": 0, "failed": 0}
 
+    use_easyocr = False
     backend: Optional[OCRBackend] = None
     if ocr:
-        if shutil.which("tesseract"):
-            backend = tesseract_backend
-        else:
-            log.warning("ocr_unavailable", note="tesseract not installed; logs will stay 'pending'")
+        try:
+            import easyocr  # noqa: F401
+            use_easyocr = True
+        except ImportError:
+            if shutil.which("tesseract"):
+                backend = tesseract_backend
+            else:
+                log.warning("ocr_unavailable",
+                            note="no easyocr / tesseract; logs will stay 'pending'")
 
     if limit:
         pdfs = pdfs[: int(limit)]
@@ -217,7 +397,10 @@ def run(config: Config, log, ocr: bool = False, limit: Optional[int] = None) -> 
         key = f"parse:{bid}"
         if db.manifest_is_done(con, "parse", key) and not ocr:
             continue
-        res = extract_from_pdf(pdf, bid, ocr_backend=backend)
+        if use_easyocr:
+            res = extract_with_easyocr(pdf, bid)
+        else:
+            res = extract_from_pdf(pdf, bid, ocr_backend=backend)
         if res.status == "parsed":
             _insert_rows(con, bid, res.rows)
             parsed += 1
