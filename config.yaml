@@ -77,6 +77,41 @@ graph:
   same_geology_radius_m: 2000   # cap so a large surficial unit doesn't form a clique
   use_scipy: true               # false -> DuckDB RTREE/ST_DWithin kNN fallback (no Delaunay)
 
+# ---- Bayesian GNN experimentation (ml/ package) -----------------------------
+ml:
+  out_dir: data/ml
+  seed: 1337
+  device: cuda                  # falls back to cpu if CUDA unavailable
+  union_edges_parquet: data/ml/union_edges.parquet
+  model:
+    hidden: 128
+    layers: 3
+    dropout: 0.2
+    variational:
+      kind: bayes_by_backprop   # bayes_by_backprop | swag (fallback)
+      prior_sigma: 1.0
+      kl_weight: 1.0            # multiplied by minibatch fraction
+      mc_samples_train: 1
+      mc_samples_eval: 30
+  train:
+    epochs: 300
+    lr: 1.0e-3
+    weight_decay: 5.0e-4
+    kl_anneal_frac: 0.3         # warm up beta 0->1 over first 30% of epochs
+    min_class_count: 20         # classes below this folded into family-OTHER for the leaderboard metric
+    focal_gamma: 2.0
+  splits:
+    scheme: spatial_block
+    block_size_ft: 20000        # ~3.8 mi; larger than the GNN receptive field
+    folds: 5
+    val_frac: 0.15
+    test_frac: 0.15
+  priors:
+    geology_prior_weight: 1.0
+    ssurgo_prior_weight: 1.0
+  predict:
+    grid_step_ft: 2000
+
 # Heavy/slow steps — OFF by default; enabled by CLI flags (--download-logs / --ocr / --dem).
 gates:
   download_logs: false   # ~49k PDF crawl, multi-hour, ~3-4 GB

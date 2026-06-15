@@ -164,6 +164,27 @@ DDL: list[str] = [
         src VARCHAR, dst VARCHAR, edge_type VARCHAR, weight DOUBLE,
         PRIMARY KEY (src, dst, edge_type)
     )""",
+
+    # ---- ML: per-soil-label covariates (point-in-polygon; for the labeled task) ---
+    # Same shape as boring_covariates but the id column is named `id` (CAST(objectid)).
+    """
+    CREATE TABLE IF NOT EXISTS soil_label_covariates (
+        id VARCHAR PRIMARY KEY,
+        surficial_unit VARCHAR, surficial_lithology VARCHAR, surficial_age VARCHAR,
+        bedrock_unit VARCHAR, bedrock_lithology VARCHAR,
+        ssurgo_mukey VARCHAR, ssurgo_muname VARCHAR,
+        ssurgo_component VARCHAR, ssurgo_drainagecl VARCHAR, ssurgo_hydgrp VARCHAR
+    )""",
+
+    # ---- ML: graph over the borings ∪ soil_labels union (labels are disjoint from
+    # borings at ~2.6 km, so the boring-only `edges` cannot connect them). node ids are
+    # prefixed 'b:'<boring_id> / 'l:'<soil_label objectid> to keep the two id-spaces apart.
+    """
+    CREATE TABLE IF NOT EXISTS ml_edges (
+        src VARCHAR, dst VARCHAR, edge_type VARCHAR, weight DOUBLE,
+        src_type VARCHAR, dst_type VARCHAR,
+        PRIMARY KEY (src, dst, edge_type)
+    )""",
 ]
 
 # node_features view: created last (depends on the tables above all existing).

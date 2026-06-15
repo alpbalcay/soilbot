@@ -352,14 +352,23 @@ def _try_rtree(con, table):
         pass
 
 
-def assign_covariates(con, config: Config, log) -> dict:
+def assign_point_covariates(con, config: Config, log, *, point_table: str,
+                            point_id: str, dest_table: str) -> dict:
+    """Point-in-polygon covariate assignment, generic over any point layer.
+
+    Joins each point in `point_table` (which must expose `geom_4326` and the id column
+    `point_id`) against geology_surficial / geology_bedrock / ssurgo_spatial and the
+    SSURGO tabular tables, writing one row per point into `dest_table`. The destination
+    must have a leading id column followed by the standard covariate columns (same shape
+    as `boring_covariates`). Used for both borings and soil_labels.
+    """
     for t in ("geology_surficial", "geology_bedrock", "ssurgo_spatial"):
         if db.table_count(con, t) > 0:
             _try_rtree(con, t)
-    con.execute("DELETE FROM boring_covariates")
-    con.execute("""
-        INSERT INTO boring_covariates
-            (boring_id, surficial_unit, surficial_lithology, surficial_age,
+    con.execute(f"DELETE FROM {dest_table}")
+    con.execute(f"""
+        INSERT INTO {dest_table}
+            (id, surficial_unit, surficial_lithology, surficial_age,
              bedrock_unit, bedrock_lithology, ssurgo_mukey, ssurgo_muname,
              ssurgo_component, ssurgo_drainagecl, ssurgo_hydgrp)
         WITH dom AS (   -- dominant SSURGO component per mapunit (highest comppct_r)
@@ -367,25 +376,80 @@ def assign_covariates(con, config: Config, log) -> dict:
             QUALIFY ROW_NUMBER() OVER (PARTITION BY mukey
                     ORDER BY comppct_r DESC NULLS LAST, cokey) = 1
         )
-        SELECT b.boring_id,
+        SELECT CAST(p.{point_id} AS VARCHAR),
                gs.geoname, gs.lithology, gs.geoage,
                gb.geoname, gb.lithology,
                sp.mukey, sp.muname, dom.compname, dom.drainagecl, agg.hydgrpdcd
-        FROM borings b
-        LEFT JOIN geology_surficial gs ON ST_Within(b.geom_4326, gs.geom_4326)
-        LEFT JOIN geology_bedrock  gb ON ST_Within(b.geom_4326, gb.geom_4326)
-        LEFT JOIN ssurgo_spatial   sp ON ST_Within(b.geom_4326, sp.geom_4326)
+        FROM {point_table} p
+        LEFT JOIN geology_surficial gs ON ST_Within(p.geom_4326, gs.geom_4326)
+        LEFT JOIN geology_bedrock  gb ON ST_Within(p.geom_4326, gb.geom_4326)
+        LEFT JOIN ssurgo_spatial   sp ON ST_Within(p.geom_4326, sp.geom_4326)
         LEFT JOIN dom ON dom.mukey = sp.mukey
         LEFT JOIN ssurgo_muaggatt agg ON agg.mukey = sp.mukey
-        QUALIFY ROW_NUMBER() OVER (PARTITION BY b.boring_id ORDER BY sp.mukey NULLS LAST) = 1
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY p.{point_id} ORDER BY sp.mukey NULLS LAST) = 1
     """)
-    n = db.table_count(con, "boring_covariates")
-    cov = con.execute("""SELECT
+    n = db.table_count(con, dest_table)
+    cov = con.execute(f"""SELECT
             SUM(CASE WHEN surficial_unit IS NOT NULL THEN 1 ELSE 0 END),
             SUM(CASE WHEN bedrock_unit  IS NOT NULL THEN 1 ELSE 0 END),
             SUM(CASE WHEN ssurgo_mukey  IS NOT NULL THEN 1 ELSE 0 END)
-        FROM boring_covariates""").fetchone()
-    stats = {"rows": n, "with_surficial": cov[0], "with_bedrock": cov[1], "with_ssurgo": cov[2]}
+        FROM {dest_table}""").fetchone()
+    stats = {"table": dest_table, "rows": n, "with_surficial": cov[0],
+             "with_bedrock": cov[1], "with_ssurgo": cov[2]}
+    log.info("covariates_assigned", **stats)
+    return stats
+
+
+def assign_covariates(con, config: Config, log) -> dict:
+    """Per-boring covariate assignment (thin wrapper over assign_point_covariates).
+
+    NOTE: boring_covariates keys its id column `boring_id`; assign_point_covariates
+    writes to a column named `id`. boring_covariates was created before this refactor,
+    so we map via a temp-free approach: the column order is identical, so an explicit
+    column list keyed by position works regardless of the physical name.
+    """
+    return _assign_into_legacy(con, config, log, point_table="borings",
+                               point_id="boring_id", dest_table="boring_covariates",
+                               id_col="boring_id")
+
+
+def _assign_into_legacy(con, config, log, *, point_table, point_id, dest_table, id_col):
+    """assign_point_covariates variant that targets a table whose id column is named
+    `id_col` (e.g. legacy boring_covariates.boring_id) instead of `id`."""
+    for t in ("geology_surficial", "geology_bedrock", "ssurgo_spatial"):
+        if db.table_count(con, t) > 0:
+            _try_rtree(con, t)
+    con.execute(f"DELETE FROM {dest_table}")
+    con.execute(f"""
+        INSERT INTO {dest_table}
+            ({id_col}, surficial_unit, surficial_lithology, surficial_age,
+             bedrock_unit, bedrock_lithology, ssurgo_mukey, ssurgo_muname,
+             ssurgo_component, ssurgo_drainagecl, ssurgo_hydgrp)
+        WITH dom AS (
+            SELECT mukey, compname, drainagecl FROM ssurgo_component
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY mukey
+                    ORDER BY comppct_r DESC NULLS LAST, cokey) = 1
+        )
+        SELECT CAST(p.{point_id} AS VARCHAR),
+               gs.geoname, gs.lithology, gs.geoage,
+               gb.geoname, gb.lithology,
+               sp.mukey, sp.muname, dom.compname, dom.drainagecl, agg.hydgrpdcd
+        FROM {point_table} p
+        LEFT JOIN geology_surficial gs ON ST_Within(p.geom_4326, gs.geom_4326)
+        LEFT JOIN geology_bedrock  gb ON ST_Within(p.geom_4326, gb.geom_4326)
+        LEFT JOIN ssurgo_spatial   sp ON ST_Within(p.geom_4326, sp.geom_4326)
+        LEFT JOIN dom ON dom.mukey = sp.mukey
+        LEFT JOIN ssurgo_muaggatt agg ON agg.mukey = sp.mukey
+        QUALIFY ROW_NUMBER() OVER (PARTITION BY p.{point_id} ORDER BY sp.mukey NULLS LAST) = 1
+    """)
+    n = db.table_count(con, dest_table)
+    cov = con.execute(f"""SELECT
+            SUM(CASE WHEN surficial_unit IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN bedrock_unit  IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN ssurgo_mukey  IS NOT NULL THEN 1 ELSE 0 END)
+        FROM {dest_table}""").fetchone()
+    stats = {"table": dest_table, "rows": n, "with_surficial": cov[0],
+             "with_bedrock": cov[1], "with_ssurgo": cov[2]}
     log.info("covariates_assigned", **stats)
     return stats
 

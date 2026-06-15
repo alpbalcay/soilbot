@@ -1,0 +1,8 @@
+# Phase-A Bayesian GNN stack (Python 3.14 / cp314). torch is the CUDA 12.8 build for
+# Blackwell (sm_120) — install from the PyTorch cu128 index:
+#   pip install --index-url https://download.pytorch.org/whl/cu128 torch
+# then: pip install -r requirements-ml.txt
+torch>=2.11            # cu128 wheel; verified working on RTX 5070 (sm_120)
+torch_geometric>=2.8   # pure-Python core; runs on native torch ops (no torch-scatter needed)
+scikit-learn>=1.5      # RF baseline + classification/calibration metrics
+# numpy / scipy already pinned in requirements.txt

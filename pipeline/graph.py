@@ -34,18 +34,15 @@ def _canon(a: str, b: str):
     return (a, b) if a < b else (b, a)
 
 
-def build_edges(con, config: Config, log) -> dict:
-    g = config["graph"]
-    ids, xy = _load_nodes(con)
+def compute_edges(ids: list, xy: np.ndarray, units: dict, g: dict, log) -> dict:
+    """Pure edge construction over arbitrary nodes (reused by the boring graph and the
+    ML borings∪soil_labels union graph). `ids` are node ids, `xy` their projected
+    coordinates in feet (metric-correct kNN), `units` maps id -> surficial unit (for
+    same_geology edges), `g` is the graph config block. Returns {(a,b,type): weight}.
+    """
     n = len(ids)
-    if n == 0:
-        log.warning("no_nodes")
-        return {"nodes": 0, "edges": 0, "by_type": {}}
     k = int(g["knn_k"])
     edges: dict[tuple, float] = {}
-    units = dict(con.execute(
-        "SELECT boring_id, surficial_unit FROM boring_covariates").fetchall())
-
     if g.get("use_scipy", True) and n > k + 1:
         tree = cKDTree(xy)
 
@@ -90,9 +87,21 @@ def build_edges(con, config: Config, log) -> dict:
     else:
         log.warning("scipy_path_skipped", nodes=n)
 
-    # Drop self-loops: co-located borings (identical coords) can make cKDTree return the
+    # Drop self-loops: co-located nodes (identical coords) can make cKDTree return the
     # query point itself at a non-zero column, yielding an a==a pair after canonicalization.
-    edges = {k: v for k, v in edges.items() if k[0] != k[1]}
+    return {k: v for k, v in edges.items() if k[0] != k[1]}
+
+
+def build_edges(con, config: Config, log) -> dict:
+    g = config["graph"]
+    ids, xy = _load_nodes(con)
+    n = len(ids)
+    if n == 0:
+        log.warning("no_nodes")
+        return {"nodes": 0, "edges": 0, "by_type": {}}
+    units = dict(con.execute(
+        "SELECT boring_id, surficial_unit FROM boring_covariates").fetchall())
+    edges = compute_edges(ids, xy, units, g, log)
     con.execute("DELETE FROM edges")
     if edges:
         con.executemany(

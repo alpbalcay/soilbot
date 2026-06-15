@@ -13,6 +13,12 @@ data/*.gpkg
 data/*.parquet
 data/.duckdb_extensions/
 
+# ML artifacts (regenerate via `python -m ml.assemble` + `python -m ml.train`)
+data/ml/
+
+# venv
+.venv/
+
 # Logs
 logs/*.log
 
