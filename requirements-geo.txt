@@ -1,0 +1,7 @@
+# Fallback geospatial stack — ONLY needed if the DuckDB spatial extension cannot
+# provide ST_Transform (reprojection) or GDAL-backed GeoPackage export on this box.
+# Not installed by default. Install with:
+#   .venv/bin/pip install -r requirements-geo.txt
+geopandas>=1.0
+pyogrio>=0.9       # bundles its own GDAL (replaces fiona, which has no cp314 wheel)
+pyproj>=3.6        # pure reprojection fallback if ST_Transform is unavailable

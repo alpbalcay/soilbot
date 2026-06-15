@@ -1,0 +1,91 @@
+# soilbot — single source of truth for URLs, org id, output paths, rate limits, phase gates.
+# All endpoints are public/anonymous (no auth tokens). Relative paths resolve from the
+# directory containing this file (the project root).
+
+org:
+  id: HggmsDF7UJsNN1FK
+  feature_server: https://services.arcgis.com/HggmsDF7UJsNN1FK/arcgis/rest/services/Soil_Borings_Map/FeatureServer
+  item_id: 1c84eb0798754d6a8852473e0fc138e8   # AGOL item the Hub slugs resolve to
+
+# The three target FeatureServer layers (verified live during the Phase-1 audit).
+layers:
+  borings:     {index: 0, name: "GDMS BORING LOG",     wkid: 102711, has_attachments: true,  expected_count: 49152}
+  boring_plan: {index: 1, name: "GDMS BORING PLAN",    wkid: 102711, has_attachments: true,  expected_count: 3829}
+  soil_label:  {index: 2, name: "Geol_soil_egr_label", wkid: 102711, has_attachments: false, expected_count: 20255}
+
+crs:
+  native_wkid: 102711           # NAD83 / New Jersey State Plane (US survey feet)
+  native_srs: "ESRI:102711"     # PROJ/GDAL authority string for ST_Transform source
+  target_srs: "EPSG:4326"       # WGS84 lon/lat
+  # Validity envelope for the coord-quality flag (a generous NJ bounding box).
+  nj_bbox: {min_lon: -75.7, min_lat: 38.8, max_lon: -73.8, max_lat: 41.4}
+
+paging:
+  page_size: 2000               # = maxRecordCount for these layers
+  out_fields: "*"
+  format: "geojson"
+  where: "1=1"
+
+covariates:
+  ssurgo:
+    sda_url: "https://sdmdataaccess.sc.egov.usda.gov/Tabular/post.rest"
+    state_like: "%NJ%"          # legend.areasymbol filter for the NJ survey areas
+  geology:
+    mapserver: "https://mapsdep.nj.gov/arcgis/rest/services/Features/Geology/MapServer"
+    surficial_layer: 25
+    bedrock_layer: 14
+    ssurgo_spatial_layer: 11
+    # The live MapServer sits behind an Imperva WAF that hard-blocks bulk pagination of the
+    # 18,004-polygon surficial layer. ArcGIS Hub pre-generates and CDN-caches a full export of
+    # the SAME dataset (item e32d33d8...), which is NOT proxied through the WAF -> use it as the
+    # PREFERRED surficial source; REST pagination (above) stays as fallback. EPSG:4326 GeoJSON.
+    surficial_bulk_url: "https://hub.arcgis.com/api/v3/datasets/e32d33d844684eecb22a0d50db3895e5_25/downloads/data?format=geojson&spatialRefId=4326&where=1=1"
+    surficial_bulk_expected: 18004
+    fetch_ssurgo_spatial: false  # 116k polys behind the Incapsula WAF; off by default (enable for per-boring SSURGO class; needs patience)
+    wkid: 3857                  # Web Mercator; reprojected to 4326 on load
+    page_size: 2000
+    burst_size: 3               # WAF trips at ~4-5 large requests; fetch in bursts of 3...
+    rest_s: 90                  # ...then rest 90s so the Incapsula request counter resets
+  dem:
+    imageserver: "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer"
+
+rate_limits:
+  arcgis:      {rps: 5, max_retries: 5, backoff_base_s: 1.0, backoff_max_s: 60, timeout_s: 60}
+  njdep:       {rps: 1, max_retries: 3, backoff_base_s: 30, backoff_max_s: 90, timeout_s: 90}  # mapsdep.nj.gov Incapsula WAF; burst-and-rest pacing (see covariates.geology) does the real avoidance
+  attachments: {rps: 3, max_retries: 5, backoff_base_s: 1.0, backoff_max_s: 60, timeout_s: 120, concurrency: 4, max_downloads_per_run: null}
+  sda:         {rps: 2, max_retries: 5, backoff_base_s: 2.0, backoff_max_s: 60, timeout_s: 180}
+
+duckdb:
+  path: data/soilbot.duckdb
+  extension_dir: data/.duckdb_extensions   # cache dir so spatial installs once
+  spatial_repo: "http://extensions.duckdb.org"
+
+paths:
+  raw_dir: data/raw
+  logs_pdf_dir: data/logs
+  covariates_dir: data/covariates
+  gpkg: data/borings.gpkg
+  edges_parquet: data/edges.parquet
+  log_dir: logs
+  schema_audit: schema_audit.md
+  report: REPORT.md
+
+graph:
+  knn_k: 8
+  delaunay: true
+  same_geology_edges: true
+  same_geology_radius_m: 2000   # cap so a large surficial unit doesn't form a clique
+  use_scipy: true               # false -> DuckDB RTREE/ST_DWithin kNN fallback (no Delaunay)
+
+# Heavy/slow steps — OFF by default; enabled by CLI flags (--download-logs / --ocr / --dem).
+gates:
+  download_logs: false   # ~49k PDF crawl, multi-hour, ~3-4 GB
+  ocr: false             # rasterize + OCR strata extraction (no OCR engine installed yet)
+  dem: false             # ~49k per-boring 3DEP identify calls
+
+# Secondary scanned-log source (county roll-up PDFs). Plain HTTP; opt-in only.
+county_pdf:
+  base: "http://wading01.oit.state.nj.us/gdms/PDFs/"
+  allowed: false
+
+user_agent: "soilbot/0.1 (research; contact: alp.balcay98@gmail.com)"

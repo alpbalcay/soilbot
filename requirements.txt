@@ -1,0 +1,10 @@
+# soilbot core dependencies.
+# Pinned to floors that have confirmed CPython 3.14 (cp314) manylinux wheels,
+# so `pip install` never triggers a source build on this box.
+duckdb>=1.1        # store + spatial extension (GeoPackage I/O, ST_Transform) + parquet export
+requests>=2.32     # HTTP client for ArcGIS REST / SDA / 3DEP
+PyYAML>=6.0        # config.yaml
+pdfplumber>=0.11   # Phase 3 vector-text extraction from boring-log PDFs
+pillow>=10         # raster handling for the OCR fallback seam
+numpy>=2.0         # array layer for scipy + coordinate handling
+scipy>=1.14        # Phase 5 graph kernel: cKDTree (kNN) + Delaunay

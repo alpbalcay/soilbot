@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Generated data artifacts (regenerate via `python -m pipeline.run`)
+data/raw/
+data/logs/
+data/covariates/
+data/*.duckdb
+data/*.duckdb.wal
+data/*.gpkg
+data/*.parquet
+data/.duckdb_extensions/
+
+# Logs
+logs/*.log
+
+# Generated reports are kept in-repo intentionally (schema_audit.md, REPORT.md)
