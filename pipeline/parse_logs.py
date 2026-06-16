@@ -155,6 +155,81 @@ def soil_family_from_text(desc: str) -> tuple[Optional[str], float]:
     return None, 0.0
 
 
+def _nums_in(text: str) -> list[float]:
+    """All numbers in a text box, treating comma as decimal (OCR writes 1.5 as '1,5') and
+    stripping stray separators like '4|2' -> [4, 2]."""
+    out = []
+    for tok in re.split(r"[|/\s]+", text.replace(",", ".")):
+        tok = tok.strip(".:-")
+        if re.fullmatch(r"\d{1,3}(?:\.\d+)?", tok):
+            out.append(float(tok))
+    return out
+
+
+def _spt_n_from_increments(incs: list[float]) -> Optional[int]:
+    """SPT N = sum of the 2nd and 3rd 6-inch increments (ASTM D1586)."""
+    ints = [int(round(v)) for v in incs if v < 100]   # blow counts; drop recovery-like values
+    if len(ints) >= 3:
+        return ints[1] + ints[2]
+    if len(ints) == 2:
+        return ints[0] + ints[1]
+    if len(ints) == 1:
+        return ints[0]
+    return None
+
+
+def parse_spoon_format(boxes: list[tuple], w: float, h: float) -> tuple[list[StrataRow], dict]:
+    """Parser for the NJDOT 'Blows on Spoon' split-spoon log format (rich: explicit per-sample
+    depth intervals + SPT blow counts). Detected by its header anchors. Columns (fractions of
+    page width): sample-id ~0.20, sample depth top/bottom ~0.26/0.33, blows-on-spoon ~0.39-0.52,
+    recovery ~0.54, soil description ~0.58+.
+    """
+    flat = "\n".join(b[2] for b in sorted(boxes, key=lambda b: (round(b[1] / 15), b[0])))
+    # units: these logs are often metric (e.g. "0.15 m Concrete"); convert depths to feet.
+    metric = bool(re.search(r"\d\s*m\b", flat)) or "NAVD 88" in flat
+    to_ft = 3.280839895 if metric else 1.0
+    header = extract_header_fields(boxes, flat)
+    # ground elevation (this format labels it 'GROUND ELEVATION')
+    ge = re.search(r"GROUND\s+ELEVATION\s*[:.;]?\s*(-?\d{1,4}(?:[.,]\d+)?)", flat, re.IGNORECASE)
+    if ge:
+        try:
+            header["surface_elevation"] = float(ge.group(1).replace(",", "."))
+        except ValueError:
+            pass
+
+    # anchor rows on sample ids in the sample column
+    samples = [(x, y, t) for (x, y, t, c) in boxes
+               if 0.16 * w < x < 0.24 * w and re.match(r"^[A-Z]-?\d{1,2}$", t.strip())]
+    samples.sort(key=lambda s: s[1])
+    rows: list[StrataRow] = []
+    for i, (sx, sy, sid) in enumerate(samples):
+        band = [b for b in boxes if abs(b[1] - sy) < 70]
+        depths = sorted([(b[0], v) for b in band for v in _nums_in(b[2])
+                         if 0.24 * w < b[0] < 0.36 * w and v < 100], key=lambda z: z[0])
+        top = depths[0][1] * to_ft if depths else None
+        bot = depths[1][1] * to_ft if len(depths) > 1 else None
+        # blows: numeric increments in the spoon column (exclude recovery at x>0.53w)
+        inc = [v for b in band if 0.37 * w < b[0] < 0.53 * w for v in _nums_in(b[2])]
+        spt = _spt_n_from_increments(inc)
+        desc = " ".join(b[2] for b in sorted(band, key=lambda b: b[0]) if b[0] > 0.57 * w)
+        fam, fam_conf = soil_family_from_text(desc)
+        rows.append(StrataRow(
+            interval_index=i,
+            top_depth=round(top, 2) if top is not None else None,
+            bottom_depth=round(bot, 2) if bot is not None else None,
+            uscs_class=fam, spt_n=spt, sample_type=sid.replace("-", ""),
+            gw_depth=header["gw_depth"], elevation=header["surface_elevation"],
+            source="ocr", ocr_status="parsed",
+            confidence=round(min(1.0, 0.3 + 0.3 * (top is not None) + 0.4 * (spt is not None)), 2),
+        ))
+    return rows, header
+
+
+def is_spoon_format(boxes: list[tuple]) -> bool:
+    flat = " ".join(b[2] for b in boxes).upper()
+    return "BLOWS ON SPOON" in flat or ("ON SPOON" in flat and "STRATIF" in flat)
+
+
 def extract_header_fields(boxes: list[tuple], flat_text: str) -> dict:
     """Surface elevation + groundwater depth from the header / water-levels area."""
     out = {"surface_elevation": None, "elev_units": None, "gw_depth": None}
@@ -325,11 +400,17 @@ def extract_with_easyocr(pdf_path: Path, boring_id: str) -> ParseResult:
     except Exception as exc:  # noqa: BLE001
         return ParseResult(boring_id, status="failed", note=f"rasterize: {exc}")
     all_rows: list[StrataRow] = []
+    fmt = "generic"
     try:
         for img in images:
             boxes = easyocr_boxes(img)
             w, h = Image.open(img).size
-            all_rows.extend(parse_boxes_to_strata(boxes, w, h))
+            if is_spoon_format(boxes):  # rich format: explicit depth intervals + SPT-N
+                fmt = "spoon"
+                rows, _ = parse_spoon_format(boxes, w, h)
+                all_rows.extend(rows)
+            else:
+                all_rows.extend(parse_boxes_to_strata(boxes, w, h))
     except Exception as exc:  # noqa: BLE001
         return ParseResult(boring_id, status="failed", note=f"easyocr: {exc}")
     for i, r in enumerate(all_rows):
