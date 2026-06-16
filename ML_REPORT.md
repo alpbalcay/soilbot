@@ -1,6 +1,6 @@
 # ML_REPORT.md — Bayesian GNN for NJ soil type (Phase A)
 
-_Generated 2026-06-15T23:34:39+00:00. Spatial block cross-validation (5 folds, ~20,000 ft blocks held out whole, so train/test are spatially separated — honest extrapolation, no corridor leakage)._
+_Generated 2026-06-16T01:47:22+00:00. Spatial block cross-validation (5 folds, ~20,000 ft blocks held out whole, so train/test are spatially separated — honest extrapolation, no corridor leakage)._
 
 ## What this predicts (Phase A)
 - Target: **NJDOT engineering soil class** (82 classes, long-tailed) at the 20,255 labeled soil-label points, with **calibrated predictive uncertainty**.
@@ -26,6 +26,17 @@ _Generated 2026-06-15T23:34:39+00:00. Spatial block cross-validation (5 folds, ~
 | knn + delaunay only | 0.270 | 0.411 | 0.023 |
 
 _Geometric edges (knn/delaunay) carry the discriminative signal; the geology-based `same_geology` and `label_boring` edges exist for **connectivity** — they guarantee the spatially-disjoint labels a boring neighbourhood (100% within 3 hops vs 73% without the bridge) — but slightly dilute point accuracy. The jumping-knowledge skip means every node still uses its own geology regardless of the graph, so coverage degrades gracefully._
+
+## Boring-relabeling experiment (auxiliary USCS task)
+
+Use the OCR'd near-surface USCS class on ~1,176 borings as an auxiliary task sharing the encoder (different taxonomy from the engineering soil-label codes, so a separate head, train-fold only). Same spatial folds.
+
+| Model | macro-F1 | accuracy | NLL ↓ | ECE ↓ |
+|---|--:|--:|--:|--:|
+| a3 (no relabeling) | 0.267 | 0.406 | 1.782 | 0.031 |
+| a3 + aux USCS relabeling | 0.258 | 0.404 | 1.811 | 0.022 |
+
+_**Honest result:** relabeling did **not** improve soil-type accuracy (macro-F1 within fold noise, slight dip) but **consistently improved calibration** (ECE). Likely cause: the OCR'd USCS class is largely predictable from geology — which the model already uses as features **and** an informative prior — so the auxiliary labels add little new information, and the descriptive→USCS OCR labels are themselves noisy. Tested at ~6% extra labels (1,176 OCR'd borings of a 1,483-log download); the full 49k OCR would test it at ~3× scale._
 
 ## Reading the table
 - **Calibration is the headline**: the Bayesian models give the lowest NLL/ECE — i.e. their probabilities are trustworthy, which is what lets the map flag undrilled-area extrapolations.

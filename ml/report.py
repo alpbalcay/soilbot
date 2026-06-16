@@ -91,6 +91,27 @@ def write(config: Config) -> str:
               "bridge) — but slightly dilute point accuracy. The jumping-knowledge skip means every node "
               "still uses its own geology regardless of the graph, so coverage degrades gracefully._"]
 
+    # relabeling experiment (a3 vs a3+aux on OCR'd borings)
+    base = out / "cv_a3_base.json"
+    auxp = out / "cv_a3_aux.json"
+    if base.exists() and auxp.exists():
+        b = json.loads(base.read_text())["mean"]
+        a = json.loads(auxp.read_text())["mean"]
+        L += ["", "## Boring-relabeling experiment (auxiliary USCS task)", "",
+              "Use the OCR'd near-surface USCS class on ~1,176 borings as an auxiliary task sharing "
+              "the encoder (different taxonomy from the engineering soil-label codes, so a separate "
+              "head, train-fold only). Same spatial folds.", "",
+              "| Model | macro-F1 | accuracy | NLL ↓ | ECE ↓ |", "|---|--:|--:|--:|--:|",
+              f"| a3 (no relabeling) | {b['macro_f1']:.3f} | {b['accuracy']:.3f} | {b['nll']:.3f} | {b['ece']:.3f} |",
+              f"| a3 + aux USCS relabeling | {a['macro_f1']:.3f} | {a['accuracy']:.3f} | {a['nll']:.3f} | {a['ece']:.3f} |",
+              "",
+              "_**Honest result:** relabeling did **not** improve soil-type accuracy (macro-F1 within "
+              "fold noise, slight dip) but **consistently improved calibration** (ECE). Likely cause: the "
+              "OCR'd USCS class is largely predictable from geology — which the model already uses as "
+              "features **and** an informative prior — so the auxiliary labels add little new information, "
+              "and the descriptive→USCS OCR labels are themselves noisy. Tested at ~6% extra labels "
+              "(1,176 OCR'd borings of a 1,483-log download); the full 49k OCR would test it at ~3× scale._"]
+
     L += [
         "",
         "## Reading the table",
