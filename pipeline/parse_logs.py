@@ -395,7 +395,8 @@ def run(config: Config, log, ocr: bool = False, limit: Optional[int] = None) -> 
     for pdf in pdfs:
         bid = _boring_id_from_filename(pdf.name)
         key = f"parse:{bid}"
-        if db.manifest_is_done(con, "parse", key) and not ocr:
+        # Resumable: skip borings already parsed (lets OCR accumulate across runs/restarts).
+        if db.manifest_is_done(con, "parse", key):
             continue
         if use_easyocr:
             res = extract_with_easyocr(pdf, bid)

@@ -56,7 +56,7 @@ def focal_ce(logits, target, weight, gamma=2.0):
 
 
 def train_one_fold(ds: Dataset, cfg, *, mode, test_fold, val_fold, fold, device,
-                   warm_state=None, log=None, active_rel=None):
+                   warm_state=None, log=None, active_rel=None, aux=False):
     mlc = cfg["ml"]
     tr_cfg = mlc["train"]
     n = ds.x_num.shape[0]
@@ -71,7 +71,16 @@ def train_one_fold(ds: Dataset, cfg, *, mode, test_fold, val_fold, fold, device,
     # move tensors to device
     x_num = ds.x_num.to(device); x_mask = ds.x_mask.to(device); cat_idx = ds.cat_idx.to(device)
     y_code = ds.y_code.to(device); y_fam = ds.y_family.to(device); y_dr = ds.y_drain.to(device)
+    y_uscs = ds.y_uscs.to(device)
     rel_index = build_rel_index(ds.edge_index, ds.edge_type, len(EDGE_TYPES), device)
+
+    # auxiliary USCS supervision: OCR'd borings in TRAIN folds only (no test/val leakage)
+    aux_idx = None
+    if aux and len(ds.uscs_classes) > 0:
+        aux_mask = (ds.node_type == 0) & (ds.y_uscs.numpy() >= 0) \
+            & (fold != test_fold) & (fold != val_fold)
+        if aux_mask.any():
+            aux_idx = torch.from_numpy(np.where(aux_mask)[0]).to(device)
 
     prior_logits = None
     if use_prior:
@@ -86,6 +95,7 @@ def train_one_fold(ds: Dataset, cfg, *, mode, test_fold, val_fold, fold, device,
         hidden=int(mlc["model"]["hidden"]), layers=int(mlc["model"]["layers"]),
         dropout=float(mlc["model"]["dropout"]),
         prior_sigma=float(mlc["model"]["variational"]["prior_sigma"]),
+        n_uscs=len(ds.uscs_classes) if aux else 0,
     ).to(device)
     if warm_state is not None:
         model.load_state_dict(warm_state, strict=False)
@@ -103,15 +113,17 @@ def train_one_fold(ds: Dataset, cfg, *, mode, test_fold, val_fold, fold, device,
     for ep in range(epochs):
         model.train()
         opt.zero_grad()
-        fam_l, code_l, dr_l = model(x_num, x_mask, cat_idx, rel_index,
-                                    sample=bayesian, prior_logits=prior_logits,
-                                    active_rel=active_rel)
+        fam_l, code_l, dr_l, uscs_l = model(x_num, x_mask, cat_idx, rel_index,
+                                            sample=bayesian, prior_logits=prior_logits,
+                                            active_rel=active_rel)
         loss = (focal_ce(code_l[tr_idx], y_code[tr_idx], cw, float(tr_cfg["focal_gamma"]))
                 + 0.5 * focal_ce(fam_l[tr_idx], y_fam[tr_idx], famw, 0.0))
         dr_t = y_dr[tr_idx]
         dmask = dr_t >= 0
         if dmask.any():
             loss = loss + 0.3 * F.cross_entropy(dr_l[tr_idx][dmask], dr_t[dmask])
+        if aux_idx is not None and uscs_l is not None:
+            loss = loss + 0.5 * F.cross_entropy(uscs_l[aux_idx], y_uscs[aux_idx])
         if bayesian:
             beta = float(mlc["model"]["variational"]["kl_weight"]) * min(1.0, (ep + 1) / anneal)
             loss = loss + beta * model.kl() / max(1, n_train)
@@ -152,15 +164,16 @@ def evaluate(model, ds, x_num, x_mask, cat_idx, rel_index, prior_logits, mask, d
     probs = torch.zeros(idx.shape[0], len(ds.code_classes), device=device)
     reps = T if bayesian else 1
     for _ in range(reps):
-        _, code_l, _ = model(x_num, x_mask, cat_idx, rel_index, sample=bayesian,
-                             prior_logits=prior_logits, active_rel=active_rel)
+        out = model(x_num, x_mask, cat_idx, rel_index, sample=bayesian,
+                    prior_logits=prior_logits, active_rel=active_rel)
+        code_l = out[1]
         probs += F.softmax(code_l[idx], dim=1)
     probs /= reps
     y = ds.y_code.numpy()[mask]
     return ev.classification_metrics(probs.cpu().numpy(), y)
 
 
-def run_cv(cfg, log, mode="a3", folds=5, active_rel=None, tag=None):
+def run_cv(cfg, log, mode="a3", folds=5, active_rel=None, tag=None, aux=False):
     device = _device(cfg)
     out = cfg.abspath(cfg.get("ml", "out_dir", default="data/ml"))
     ds = Dataset.load(out / "dataset.pt")
@@ -183,10 +196,10 @@ def run_cv(cfg, log, mode="a3", folds=5, active_rel=None, tag=None):
         warm = None
         if mode in ("a2", "a3"):
             a1 = train_one_fold(ds, cfg, mode="a1", test_fold=tf, val_fold=vf, fold=fold,
-                                device=device, log=None, active_rel=active_rel)
+                                device=device, log=None, active_rel=active_rel, aux=aux)
             warm = a1["state"]
         r = train_one_fold(ds, cfg, mode=mode, test_fold=tf, val_fold=vf, fold=fold,
-                           device=device, warm_state=warm, log=log, active_rel=active_rel)
+                           device=device, warm_state=warm, log=log, active_rel=active_rel, aux=aux)
         r["fold"] = tf; r["secs"] = round(time.time() - t0, 1)
         del r["state"]
         results.append(r)
@@ -222,13 +235,15 @@ if __name__ == "__main__":
                     help="comma list of active edge-type indices for ablation "
                          "(0=knn,1=delaunay,2=same_geology,3=label_boring)")
     ap.add_argument("--tag", default=None, help="output name override (cv_<tag>.json)")
+    ap.add_argument("--aux", action="store_true",
+                    help="add the auxiliary USCS task on OCR'd borings (relabeling)")
     args = ap.parse_args()
     active_rel = set(int(x) for x in args.edges.split(",")) if args.edges else None
     cfg = Config.load(None)
     rid = new_run_id()
     logger = setup(cfg.path("log_dir"), "ml.log", rid, f"train_{args.mode}", console=True)
     res = run_cv(cfg, logger, mode=args.mode, folds=args.folds,
-                 active_rel=active_rel, tag=args.tag)
+                 active_rel=active_rel, tag=args.tag, aux=args.aux)
     print(f"\n=== CV {args.mode} (spatial {args.folds}-fold) ===")
     for r in res["results"]:
         t = r["test"]

@@ -26,18 +26,19 @@ def test_model_forward_backward():
     ei = torch.randint(0, N, (2, E)); et = torch.randint(0, len(EDGE_TYPES), (E,))
     rel = build_rel_index(ei, et, len(EDGE_TYPES), "cpu")
     m = SoilGNN(cat_cardinalities=card, num_dim=46, n_codes=82, n_families=15, n_drains=11,
-                edge_types=EDGE_TYPES, hidden=32, layers=3)
+                edge_types=EDGE_TYPES, hidden=32, layers=3, n_uscs=12)
     m.train()
     pl = torch.randn(N, 82)
-    fam, code, dr = m(x_num, x_mask, cat, rel, sample=True, prior_logits=pl)
-    assert code.shape == (N, 82) and fam.shape == (N, 15)
-    loss = torch.nn.functional.cross_entropy(code, torch.randint(0, 82, (N,))) + m.kl() / N
+    fam, code, dr, uscs = m(x_num, x_mask, cat, rel, sample=True, prior_logits=pl)
+    assert code.shape == (N, 82) and fam.shape == (N, 15) and uscs.shape == (N, 12)
+    loss = (torch.nn.functional.cross_entropy(code, torch.randint(0, 82, (N,)))
+            + torch.nn.functional.cross_entropy(uscs, torch.randint(0, 12, (N,))) + m.kl() / N)
     loss.backward()
     assert not any(p.grad is not None and bool(p.grad.isnan().any()) for p in m.parameters())
     # ablation: deterministic + edge subset
-    fam, code, dr = m(x_num, x_mask, cat, rel, sample=False, active_rel={0, 1})
+    fam, code, dr, uscs = m(x_num, x_mask, cat, rel, sample=False, active_rel={0, 1})
     assert code.shape == (N, 82)
-    print("model forward/backward/KL/ablation OK")
+    print("model forward/backward/KL/ablation/aux-head OK")
 
 
 def test_spatial_splits_disjoint():

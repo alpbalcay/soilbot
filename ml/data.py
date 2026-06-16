@@ -47,6 +47,7 @@ class Dataset:
     y_code: torch.Tensor           # [N] long, -1 where unlabeled
     y_family: torch.Tensor         # [N] long, -1 where unlabeled
     y_drain: torch.Tensor          # [N] long, -1 where unlabeled
+    y_uscs: torch.Tensor           # [N] long, near-surface USCS from OCR (boring nodes), -1 else
     edge_index: torch.Tensor       # [2, E] long
     edge_type: torch.Tensor        # [E] long (index into EDGE_TYPES)
     edge_weight: torch.Tensor      # [E] float
@@ -54,6 +55,7 @@ class Dataset:
     code_classes: list             # idx -> code string
     family_classes: list
     drain_classes: list
+    uscs_classes: list             # idx -> USCS family string (auxiliary task)
     cat_cardinalities: list        # per CAT_COLS vocab size (incl. MISSING/OOV)
 
     def save(self, path):
@@ -61,10 +63,12 @@ class Dataset:
             "node_ids": self.node_ids, "node_type": self.node_type, "xy": self.xy,
             "x_num": self.x_num, "x_mask": self.x_mask, "cat_idx": self.cat_idx,
             "y_code": self.y_code, "y_family": self.y_family, "y_drain": self.y_drain,
+            "y_uscs": self.y_uscs,
             "edge_index": self.edge_index, "edge_type": self.edge_type,
             "edge_weight": self.edge_weight, "vocabs": self.vocabs,
             "code_classes": self.code_classes, "family_classes": self.family_classes,
-            "drain_classes": self.drain_classes, "cat_cardinalities": self.cat_cardinalities,
+            "drain_classes": self.drain_classes, "uscs_classes": self.uscs_classes,
+            "cat_cardinalities": self.cat_cardinalities,
         }, path)
 
     @staticmethod
@@ -192,6 +196,30 @@ def build_dataset(con, config: Config, log=None) -> Dataset:
         if dr:
             y_drain[i] = drain_vocab[str(dr)]
 
+    # ---- auxiliary USCS target: near-surface OCR class per boring (relabeling) ----
+    # The topmost stratum (smallest interval_index) is the shallowest -> a surface-comparable
+    # USCS family. Different taxonomy from the engineering soil_labels, so it feeds a separate
+    # head that shares the encoder; it ~3x's the supervised node count.
+    top_uscs = con.execute("""
+        SELECT boring_id, uscs_class FROM (
+            SELECT boring_id, uscs_class,
+                   ROW_NUMBER() OVER (PARTITION BY boring_id ORDER BY interval_index) rn
+            FROM strata WHERE uscs_class IS NOT NULL
+        ) WHERE rn = 1
+    """).fetchall()
+    uscs_vocab = {}
+    for _bid, u in top_uscs:
+        uscs_vocab.setdefault(u, len(uscs_vocab))
+    uscs_classes = [None] * len(uscs_vocab)
+    for k, v in uscs_vocab.items():
+        uscs_classes[v] = k
+    boring_index = {nid: i for i, nid in enumerate(node_ids)}
+    y_uscs = np.full(n, -1, dtype=np.int64)
+    for bid, u in top_uscs:
+        ni = boring_index.get("b:" + str(bid))
+        if ni is not None:
+            y_uscs[ni] = uscs_vocab[u]
+
     # ---- edges from ml_edges -> integer node indices ----
     index = {nid: i for i, nid in enumerate(node_ids)}
     erows = con.execute(
@@ -217,13 +245,15 @@ def build_dataset(con, config: Config, log=None) -> Dataset:
         x_num=torch.from_numpy(x_num), x_mask=torch.from_numpy(x_mask),
         cat_idx=torch.from_numpy(cat_idx),
         y_code=torch.from_numpy(y_code), y_family=torch.from_numpy(y_family),
-        y_drain=torch.from_numpy(y_drain),
+        y_drain=torch.from_numpy(y_drain), y_uscs=torch.from_numpy(y_uscs),
         edge_index=edge_index, edge_type=edge_type, edge_weight=edge_weight,
         vocabs=vocabs, code_classes=code_classes, family_classes=family_classes,
-        drain_classes=drain_classes, cat_cardinalities=cat_cardinalities,
+        drain_classes=drain_classes, uscs_classes=uscs_classes,
+        cat_cardinalities=cat_cardinalities,
     )
     if log:
         log.info("dataset_built", nodes=n, labels=int((node_type == 1).sum()),
+                 ocr_uscs_borings=int((y_uscs >= 0).sum()), uscs_classes=len(uscs_classes),
                  edges=int(edge_index.shape[1]), codes=len(code_classes),
                  families=len(family_classes), drains=len(drain_classes),
                  norm={"x_mean": x_mean.tolist(), "x_scale": float(x_scale),

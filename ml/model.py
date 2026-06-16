@@ -103,10 +103,11 @@ class HeteroSAGELayer(nn.Module):
 class SoilGNN(nn.Module):
     def __init__(self, *, cat_cardinalities, num_dim, n_codes, n_families, n_drains,
                  edge_types, hidden=128, layers=3, dropout=0.2, prior_sigma=1.0,
-                 emb_dim_cap=16):
+                 emb_dim_cap=16, n_uscs=0):
         super().__init__()
         self.edge_types = edge_types
         self.n_codes, self.n_families, self.n_drains = n_codes, n_families, n_drains
+        self.n_uscs = n_uscs
         # per-column embeddings (dim ~ sqrt(cardinality), capped)
         self.embs = nn.ModuleList()
         emb_total = 0
@@ -126,6 +127,8 @@ class SoilGNN(nn.Module):
         self.family_head = BayesianLinear(head_in, n_families, prior_sigma)
         self.code_head = BayesianLinear(head_in + n_families, n_codes, prior_sigma)
         self.drain_head = BayesianLinear(head_in, n_drains, prior_sigma)
+        # auxiliary near-surface USCS head (from OCR'd borings) — shares the encoder
+        self.uscs_head = BayesianLinear(head_in, n_uscs, prior_sigma) if n_uscs > 0 else None
 
     def encode(self, x_num, x_mask, cat_idx, rel_index, sample=True, active_rel=None):
         parts = [emb(cat_idx[:, j]) for j, emb in enumerate(self.embs)]
@@ -144,7 +147,8 @@ class SoilGNN(nn.Module):
         if prior_logits is not None:
             code_logits = code_logits + prior_logits
         drain_logits = self.drain_head(h, sample)
-        return fam_logits, code_logits, drain_logits
+        uscs_logits = self.uscs_head(h, sample) if self.uscs_head is not None else None
+        return fam_logits, code_logits, drain_logits, uscs_logits
 
     def forward(self, x_num, x_mask, cat_idx, rel_index, sample=True,
                 prior_logits=None, active_rel=None):
@@ -153,6 +157,8 @@ class SoilGNN(nn.Module):
 
     def kl(self):
         k = self.input.kl() + self.family_head.kl() + self.code_head.kl() + self.drain_head.kl()
+        if self.uscs_head is not None:
+            k = k + self.uscs_head.kl()
         for conv in self.convs:
             k = k + conv.kl()
         return k
