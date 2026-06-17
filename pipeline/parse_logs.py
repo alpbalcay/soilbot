@@ -107,15 +107,30 @@ def easyocr_backend(image_path: Path) -> str:
     return "\n".join(b[2] for b in boxes)
 
 
-def _rasterize(pdf_path: Path, dpi: int = 200) -> list[Path]:
-    """Rasterize a PDF to PNG page images via poppler's pdftoppm (present on this box)."""
+def _rasterize(pdf_path: Path, max_px: int = 3400) -> list[Path]:
+    """Rasterize a PDF to PNG page images via poppler's pdftoppm, bounding the longest side to
+    `max_px`. Using -scale-to (not a fixed -r dpi) means pdftoppm NEVER builds an oversized
+    intermediate: NJDOT has a few 36x31-inch plan sheets that at 300 dpi rasterize to 100M+
+    pixel PNGs that exhaust 12 GB VRAM and wedge easyocr. A normal letter page -> ~2630x3400,
+    effectively ~300 dpi, so OCR quality is unchanged."""
     if not shutil.which("pdftoppm"):
         raise RuntimeError("pdftoppm (poppler) not installed")
     tmp = ensure_dir(pdf_path.parent / "_raster")
     prefix = tmp / pdf_path.stem
-    subprocess.run(["pdftoppm", "-png", "-r", str(dpi), str(pdf_path), str(prefix)],
+    subprocess.run(["pdftoppm", "-png", "-scale-to", str(max_px), str(pdf_path), str(prefix)],
                    check=True, capture_output=True, timeout=180)
     return sorted(tmp.glob(f"{pdf_path.stem}*.png"))
+
+
+def _cleanup_rasters(pdf_path: Path) -> None:
+    """Delete this PDF's rasterized pages — the _raster dir otherwise grows unbounded (5+ GB)."""
+    tmp = pdf_path.parent / "_raster"
+    if tmp.exists():
+        for f in tmp.glob(f"{pdf_path.stem}*.png"):
+            try:
+                f.unlink()
+            except OSError:
+                pass
 
 
 def _prep_image(img_path: Path, max_dim: int = 3400):
@@ -413,16 +428,15 @@ def extract_from_pdf(pdf_path: Path, boring_id: str,
 def extract_with_easyocr(pdf_path: Path, boring_id: str) -> ParseResult:
     """Rasterize + easyocr + layout-aware parse. Coarse soil-class + elevation/GW; depth/SPT
     are sparse (descriptive scanned logs). Status 'parsed' iff ≥1 soil row recovered."""
-    from PIL import Image
     try:
-        images = _rasterize(pdf_path, dpi=300)
+        images = _rasterize(pdf_path, max_px=3400)  # bounded at the source (no VRAM blowups)
     except Exception as exc:  # noqa: BLE001
         return ParseResult(boring_id, status="failed", note=f"rasterize: {exc}")
     all_rows: list[StrataRow] = []
     fmt = "generic"
     try:
         for img in images[:4]:  # cap pages: the log + SPT data sit on the first page(s)
-            p, w, h = _prep_image(img)  # downscale oversized scans (VRAM/runtime guard)
+            p, w, h = _prep_image(img)  # safety net if a page is still oversized
             boxes = easyocr_boxes(p)
             if is_spoon_format(boxes):  # rich format: explicit depth intervals + SPT-N
                 fmt = "spoon"
@@ -432,6 +446,8 @@ def extract_with_easyocr(pdf_path: Path, boring_id: str) -> ParseResult:
                 all_rows.extend(parse_boxes_to_strata(boxes, w, h))
     except Exception as exc:  # noqa: BLE001
         return ParseResult(boring_id, status="failed", note=f"easyocr: {exc}")
+    finally:
+        _cleanup_rasters(pdf_path)
     for i, r in enumerate(all_rows):
         r.interval_index = i
     if all_rows:
