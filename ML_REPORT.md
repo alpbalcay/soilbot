@@ -1,6 +1,6 @@
 # ML_REPORT.md — Bayesian GNN for NJ soil type (Phase A)
 
-_Generated 2026-06-16T01:47:22+00:00. Spatial block cross-validation (5 folds, ~20,000 ft blocks held out whole, so train/test are spatially separated — honest extrapolation, no corridor leakage)._
+_Generated 2026-06-17T00:43:12+00:00. Spatial block cross-validation (5 folds, ~20,000 ft blocks held out whole, so train/test are spatially separated — honest extrapolation, no corridor leakage)._
 
 ## What this predicts (Phase A)
 - Target: **NJDOT engineering soil class** (82 classes, long-tailed) at the 20,255 labeled soil-label points, with **calibrated predictive uncertainty**.
@@ -37,6 +37,20 @@ Use the OCR'd near-surface USCS class on ~1,176 borings as an auxiliary task sha
 | a3 + aux USCS relabeling | 0.258 | 0.404 | 1.811 | 0.022 |
 
 _**Honest result:** relabeling did **not** improve soil-type accuracy (macro-F1 within fold noise, slight dip) but **consistently improved calibration** (ECE). Likely cause: the OCR'd USCS class is largely predictable from geology — which the model already uses as features **and** an informative prior — so the auxiliary labels add little new information, and the descriptive→USCS OCR labels are themselves noisy. Tested at ~6% extra labels (1,176 OCR'd borings of a 1,483-log download); the full 49k OCR would test it at ~3× scale._
+
+## B1 — 3D depth-resolved (SPT-N / USCS-at-depth)
+
+Depth-conditioned decoder on the spatial GNN latent, trained on OCR'd 'Blows on Spoon' split-spoon profiles (depth + SPT-N + USCS). Spatial-block CV over borings; SPT-N in log1p space; T=30 posterior samples. **SPT-N is the non-redundant signal geology can't provide** (the relabeling experiment showed coarse soil-class is geology-derivable).
+
+| Predictor | SPT-N CRPS ↓ | 90% coverage | RMSE (log) |
+|---|--:|--:|--:|
+| B1 3D GNN | 0.634 | 0.685 | 1.082 |
+| baseline: depth_mean | 0.515 | 0.927 | 0.918 |
+| baseline: geology_depth_gbm | 0.605 | 0.469 | 0.976 |
+
+USCS-at-depth: macro-F1 0.112. SPT-N back-transformed RMSE ≈ 28 blows.
+
+_**Honest status:** at the current OCR scale (~150 spoon-format borings / ~640 SPT samples) the 3D GNN **underperforms a depth-mean baseline** — a heteroscedastic Bayesian model over-fits with so few spatially-CV'd samples. The pipeline (depth conditioning, calibrated SPT intervals, baselines) is validated end-to-end; meaningful performance needs the full-corpus OCR (~10k profiles), which is running. **OCR'd SPT-N values carry digit-error noise** (sanity-gated to 0–100 blows, 0–200 ft); a hand-labeled gold set is still owed before trusting individual N._
 
 ## Reading the table
 - **Calibration is the headline**: the Bayesian models give the lowest NLL/ECE — i.e. their probabilities are trustworthy, which is what lets the map flag undrilled-area extrapolations.

@@ -112,6 +112,35 @@ def write(config: Config) -> str:
               "and the descriptive→USCS OCR labels are themselves noisy. Tested at ~6% extra labels "
               "(1,176 OCR'd borings of a 1,483-log download); the full 49k OCR would test it at ~3× scale._"]
 
+    # B1 3D depth-resolved
+    b1 = out / "cv_b1.json"
+    if b1.exists():
+        j = json.loads(b1.read_text())
+        s = j["model"]["mean"].get("spt", {})
+        u = j["model"]["mean"].get("uscs", {})
+        L += ["", "## B1 — 3D depth-resolved (SPT-N / USCS-at-depth)", "",
+              "Depth-conditioned decoder on the spatial GNN latent, trained on OCR'd 'Blows on Spoon' "
+              "split-spoon profiles (depth + SPT-N + USCS). Spatial-block CV over borings; SPT-N in "
+              "log1p space; T=30 posterior samples. **SPT-N is the non-redundant signal geology can't "
+              "provide** (the relabeling experiment showed coarse soil-class is geology-derivable).", "",
+              "| Predictor | SPT-N CRPS ↓ | 90% coverage | RMSE (log) |", "|---|--:|--:|--:|",
+              f"| B1 3D GNN | {s.get('crps',float('nan')):.3f} | {s.get('cov90',float('nan')):.3f} | {s.get('rmse',float('nan')):.3f} |"]
+        for name in ("depth_mean", "geology_depth_gbm"):
+            d = j["baselines"].get(name, {})
+            if d:
+                L.append(f"| baseline: {name} | {d.get('crps',float('nan')):.3f} | "
+                         f"{d.get('cov90',float('nan')):.3f} | {d.get('rmse',float('nan')):.3f} |")
+        L += ["",
+              f"USCS-at-depth: macro-F1 {u.get('macro_f1',float('nan')):.3f}. "
+              f"SPT-N back-transformed RMSE ≈ {s.get('rmse_blows',float('nan')):.0f} blows.",
+              "",
+              "_**Honest status:** at the current OCR scale (~150 spoon-format borings / ~640 SPT samples) "
+              "the 3D GNN **underperforms a depth-mean baseline** — a heteroscedastic Bayesian model over-fits "
+              "with so few spatially-CV'd samples. The pipeline (depth conditioning, calibrated SPT intervals, "
+              "baselines) is validated end-to-end; meaningful performance needs the full-corpus OCR (~10k "
+              "profiles), which is running. **OCR'd SPT-N values carry digit-error noise** (sanity-gated to "
+              "0–100 blows, 0–200 ft); a hand-labeled gold set is still owed before trusting individual N._"]
+
     L += [
         "",
         "## Reading the table",

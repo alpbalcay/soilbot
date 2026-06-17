@@ -55,6 +55,29 @@ def uncertainty_error_auroc(probs: np.ndarray, y: np.ndarray) -> float:
     return float(roc_auc_score(err, ent))
 
 
+def gaussian_crps(mu: np.ndarray, sigma: np.ndarray, y: np.ndarray) -> float:
+    """Closed-form CRPS for a Gaussian predictive distribution (lower = better)."""
+    from scipy.stats import norm
+    sigma = np.clip(sigma, 1e-6, None)
+    z = (y - mu) / sigma
+    crps = sigma * (z * (2 * norm.cdf(z) - 1) + 2 * norm.pdf(z) - 1.0 / np.sqrt(np.pi))
+    return float(crps.mean())
+
+
+def regression_metrics(mu: np.ndarray, sigma: np.ndarray, y: np.ndarray) -> dict:
+    """mu/sigma/y in the model's space (e.g. log1p SPT-N). Reports error + calibration."""
+    err = mu - y
+    out = {
+        "rmse": float(np.sqrt((err ** 2).mean())),
+        "mae": float(np.abs(err).mean()),
+        "crps": gaussian_crps(mu, sigma, y),
+        # 90% central credible-interval coverage (well-calibrated -> ~0.90)
+        "cov90": float((np.abs(err) <= 1.6449 * np.clip(sigma, 1e-6, None)).mean()),
+        "n": int(len(y)),
+    }
+    return out
+
+
 def reliability_curve(probs: np.ndarray, y: np.ndarray, bins: int = 15):
     conf = probs.max(1)
     correct = (probs.argmax(1) == y).astype(float)

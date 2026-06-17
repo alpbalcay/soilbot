@@ -171,3 +171,68 @@ def build_rel_index(edge_index, edge_type, n_edge_types, device):
         m = edge_type == r
         rel.append((edge_index[0, m].to(device), edge_index[1, m].to(device)))
     return rel
+
+
+def fourier_depth(z, n_freq=6):
+    """Fourier features of a standardized depth scalar: [z, sin(2^k z), cos(2^k z)]."""
+    feats = [z]
+    for k in range(n_freq):
+        f = 2.0 ** k
+        feats.append(torch.sin(f * z))
+        feats.append(torch.cos(f * z))
+    return torch.cat(feats, dim=-1)
+
+
+class SoilGNN3D(nn.Module):
+    """3D depth-resolved model: the GraphSAGE encoder produces a per-boring spatial latent;
+    a depth-conditioned decoder predicts SPT-N (heteroscedastic), USCS class, and groundwater
+    as a function of (latent, depth). Reuses the Phase-A encoder verbatim; only the heads change.
+    """
+
+    def __init__(self, *, cat_cardinalities, num_dim, edge_types, n_uscs, n_freq=6,
+                 hidden=128, layers=3, dropout=0.2, prior_sigma=1.0, emb_dim_cap=16):
+        super().__init__()
+        self.edge_types = edge_types
+        self.n_freq = n_freq
+        self.embs = nn.ModuleList()
+        emb_total = 0
+        for card in cat_cardinalities:
+            d = min(emb_dim_cap, max(2, int(round(card ** 0.5))))
+            self.embs.append(nn.Embedding(card, d))
+            emb_total += d
+        self.input = BayesianLinear(emb_total + num_dim, hidden, prior_sigma)
+        self.convs = nn.ModuleList(
+            [HeteroSAGELayer(hidden, hidden, edge_types, prior_sigma) for _ in range(layers)])
+        self.dropout = dropout
+        depth_dim = 1 + 2 * n_freq
+        dec_in = hidden * 2 + depth_dim          # [JK latent ; γ(depth)]
+        self.spt_head = BayesianLinear(dec_in, 2, prior_sigma)     # μ, logσ² (log1p N space)
+        self.uscs_head = BayesianLinear(dec_in, n_uscs, prior_sigma)
+        self.gw_head = BayesianLinear(hidden * 2, 2, prior_sigma)  # per-boring, depth-independent
+
+    def encode(self, x_num, x_mask, cat_idx, rel_index, sample=True, active_rel=None):
+        parts = [emb(cat_idx[:, j]) for j, emb in enumerate(self.embs)]
+        parts += [x_num, x_mask]
+        h0 = F.relu(self.input(torch.cat(parts, dim=1), sample))
+        h = h0
+        for conv in self.convs:
+            h = conv(h, rel_index, sample, active_rel)
+            h = F.dropout(h, p=self.dropout, training=self.training)
+        return torch.cat([h, h0], dim=1)
+
+    def decode(self, h_sel, depth_std, sample=True):
+        """h_sel [M, 2*hidden] latents for the sampled nodes; depth_std [M,1] standardized depth."""
+        g = fourier_depth(depth_std, self.n_freq)
+        z = torch.cat([h_sel, g], dim=1)
+        spt = self.spt_head(z, sample)            # [M,2]
+        uscs = self.uscs_head(z, sample)          # [M,n_uscs]
+        return spt, uscs
+
+    def gw(self, h_sel, sample=True):
+        return self.gw_head(h_sel, sample)        # [M,2] per boring
+
+    def kl(self):
+        k = self.input.kl() + self.spt_head.kl() + self.uscs_head.kl() + self.gw_head.kl()
+        for conv in self.convs:
+            k = k + conv.kl()
+        return k

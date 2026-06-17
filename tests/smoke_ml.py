@@ -57,7 +57,31 @@ def test_spatial_splits_disjoint():
     print("spatial-block splits disjoint + whole-block OK")
 
 
+def test_3d_model():
+    from ml.model import SoilGNN3D, build_rel_index
+    torch.manual_seed(0); N, E = 300, 2000
+    card = [10, 8, 6, 12, 9, 4, 4, 4, 4]
+    cat = torch.stack([torch.randint(0, c, (N,)) for c in card], dim=1)
+    xn = torch.randn(N, 23); xm = torch.ones(N, 23)
+    ei = torch.randint(0, N, (2, E)); et = torch.randint(0, len(EDGE_TYPES), (E,))
+    rel = build_rel_index(ei, et, len(EDGE_TYPES), "cpu")
+    m = SoilGNN3D(cat_cardinalities=card, num_dim=46, edge_types=EDGE_TYPES, n_uscs=9,
+                  hidden=32, layers=3)
+    m.train()
+    h = m.encode(xn, xm, cat, rel, sample=True)
+    M = 60; sn = torch.randint(0, N, (M,)); sd = torch.randn(M, 1)
+    spt, uscs = m.decode(h[sn], sd, sample=True)
+    assert spt.shape == (M, 2) and uscs.shape == (M, 9) and m.gw(h[sn]).shape == (M, 2)
+    y = torch.randn(M)
+    nll = 0.5 * (spt[:, 1] + (y - spt[:, 0]) ** 2 / spt[:, 1].exp()).mean()
+    loss = nll + torch.nn.functional.cross_entropy(uscs, torch.randint(0, 9, (M,))) + m.kl() / M
+    loss.backward()
+    assert not any(p.grad is not None and bool(p.grad.isnan().any()) for p in m.parameters())
+    print("3D depth-conditioned model (encode/decode/gw/NLL/KL) OK")
+
+
 if __name__ == "__main__":
     test_model_forward_backward()
     test_spatial_splits_disjoint()
+    test_3d_model()
     print("ALL ML SMOKE PASSED")
