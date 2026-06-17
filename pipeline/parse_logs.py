@@ -118,6 +118,25 @@ def _rasterize(pdf_path: Path, dpi: int = 200) -> list[Path]:
     return sorted(tmp.glob(f"{pdf_path.stem}*.png"))
 
 
+def _prep_image(img_path: Path, max_dim: int = 3400):
+    """Cap oversized scans before OCR -> bounds easyocr GPU memory + runtime. Normal 300-dpi
+    letter pages (~2544x3300) are under the cap and pass through untouched; only the rare huge/
+    high-res sheets (some reach 100M+ pixels and exhaust 12 GB VRAM) get downscaled. Returns
+    (path-to-use, width, height)."""
+    from PIL import Image
+    Image.MAX_IMAGE_PIXELS = None  # local trusted files; disable the decompression-bomb guard
+    with Image.open(img_path) as im:
+        w, h = im.size
+        if max(w, h) <= max_dim:
+            return img_path, w, h
+        scale = max_dim / max(w, h)
+        nw, nh = int(w * scale), int(h * scale)
+        ds = im.convert("RGB").resize((nw, nh))
+    out = img_path.with_suffix(".ds.png")
+    ds.save(out)
+    return out, nw, nh
+
+
 # ---- layout-aware extraction from positioned OCR boxes ---------------------
 # NJDOT logs are descriptive (e.g. "moist, m.-f. SAND, some silt, [FILL]"), not clean USCS
 # codes, so we map the dominant soil noun + modifier to a coarse USCS group. Approximate by
@@ -402,9 +421,9 @@ def extract_with_easyocr(pdf_path: Path, boring_id: str) -> ParseResult:
     all_rows: list[StrataRow] = []
     fmt = "generic"
     try:
-        for img in images:
-            boxes = easyocr_boxes(img)
-            w, h = Image.open(img).size
+        for img in images[:4]:  # cap pages: the log + SPT data sit on the first page(s)
+            p, w, h = _prep_image(img)  # downscale oversized scans (VRAM/runtime guard)
+            boxes = easyocr_boxes(p)
             if is_spoon_format(boxes):  # rich format: explicit depth intervals + SPT-N
                 fmt = "spoon"
                 rows, _ = parse_spoon_format(boxes, w, h)
