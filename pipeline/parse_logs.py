@@ -434,16 +434,24 @@ def extract_with_easyocr(pdf_path: Path, boring_id: str) -> ParseResult:
         return ParseResult(boring_id, status="failed", note=f"rasterize: {exc}")
     all_rows: list[StrataRow] = []
     fmt = "generic"
+    spoon = False
     try:
-        for img in images[:4]:  # cap pages: the log + SPT data sit on the first page(s)
+        # OCR page 1, detect format. Only the rich 'Blows on Spoon' logs are worth OCR'ing
+        # further pages (deep borings continue across pages); non-spoon multi-page documents
+        # (plan sheets, notes) are stopped after page 1 — OCR is the cost, so skipping pages
+        # 2+ on non-spoon docs is the main throughput win in heavy regions.
+        for i, img in enumerate(images[:4]):
             p, w, h = _prep_image(img)  # safety net if a page is still oversized
             boxes = easyocr_boxes(p)
-            if is_spoon_format(boxes):  # rich format: explicit depth intervals + SPT-N
-                fmt = "spoon"
+            if i == 0:
+                spoon = is_spoon_format(boxes)
+                fmt = "spoon" if spoon else "generic"
+            if spoon:
                 rows, _ = parse_spoon_format(boxes, w, h)
                 all_rows.extend(rows)
             else:
                 all_rows.extend(parse_boxes_to_strata(boxes, w, h))
+                break  # non-spoon: don't OCR remaining pages
     except Exception as exc:  # noqa: BLE001
         return ParseResult(boring_id, status="failed", note=f"easyocr: {exc}")
     finally:
