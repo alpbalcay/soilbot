@@ -1,6 +1,6 @@
 # ML_REPORT.md — Bayesian GNN for NJ soil type (Phase A)
 
-_Generated 2026-06-17T00:43:12+00:00. Spatial block cross-validation (5 folds, ~20,000 ft blocks held out whole, so train/test are spatially separated — honest extrapolation, no corridor leakage)._
+_Generated 2026-06-17T14:46:51+00:00. Spatial block cross-validation (5 folds, ~20,000 ft blocks held out whole, so train/test are spatially separated — honest extrapolation, no corridor leakage)._
 
 ## What this predicts (Phase A)
 - Target: **NJDOT engineering soil class** (82 classes, long-tailed) at the 20,255 labeled soil-label points, with **calibrated predictive uncertainty**.
@@ -44,11 +44,11 @@ Depth-conditioned decoder on the spatial GNN latent, trained on OCR'd 'Blows on 
 
 | Predictor | SPT-N CRPS ↓ | 90% coverage | RMSE (log) |
 |---|--:|--:|--:|
-| B1 3D GNN | 0.634 | 0.685 | 1.082 |
-| baseline: depth_mean | 0.515 | 0.927 | 0.918 |
-| baseline: geology_depth_gbm | 0.605 | 0.469 | 0.976 |
+| B1 3D GNN | 0.628 | 0.727 | 1.075 |
+| baseline: depth_mean | 0.516 | 0.938 | 0.921 |
+| baseline: geology_depth_gbm | 0.570 | 0.563 | 0.941 |
 
-USCS-at-depth: macro-F1 0.112. SPT-N back-transformed RMSE ≈ 28 blows.
+USCS-at-depth: macro-F1 0.093. SPT-N back-transformed RMSE ≈ 28 blows.
 
 _**Honest status:** at the current OCR scale (~150 spoon-format borings / ~640 SPT samples) the 3D GNN **underperforms a depth-mean baseline** — a heteroscedastic Bayesian model over-fits with so few spatially-CV'd samples. The pipeline (depth conditioning, calibrated SPT intervals, baselines) is validated end-to-end; meaningful performance needs the full-corpus OCR (~10k profiles), which is running. **OCR'd SPT-N values carry digit-error noise** (sanity-gated to 0–100 blows, 0–200 ft); a hand-labeled gold set is still owed before trusting individual N._
 
