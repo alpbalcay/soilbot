@@ -102,6 +102,28 @@ DDL: list[str] = [
         PRIMARY KEY (boring_id, interval_index)
     )""",
 
+    # ---- strata_derived: geotechnical properties from the soil-equation engine (soilbot_rs)
+    # One row per strata interval. Effective-stress profile + SPT corrections + derived
+    # strength/density/stiffness/bearing/liquefaction. NULL where a property does not apply
+    # (e.g. φ′/Dr only for granular soils, Su only for cohesive) or inputs are missing.
+    """
+    CREATE TABLE IF NOT EXISTS strata_derived (
+        boring_id VARCHAR, interval_index INTEGER,
+        depth_ft DOUBLE,                  -- sample reference depth (interval midpoint)
+        sigma_v0_tsf DOUBLE,              -- total vertical stress
+        sigma_eff_v0_tsf DOUBLE,          -- effective vertical stress σ'v0
+        gamma_pcf DOUBLE,                 -- moist unit weight used (by USCS)
+        n60 DOUBLE, cn DOUBLE, n1_60 DOUBLE,
+        phi_peck_deg DOUBLE, phi_hatanaka_deg DOUBLE,   -- friction angle (granular)
+        dr_pct DOUBLE,                    -- relative density (granular)
+        su_tsf DOUBLE,                    -- undrained shear strength (cohesive)
+        e_modulus_tsf DOUBLE, m_constrained_tsf DOUBLE,
+        allow_bearing_tsf DOUBLE,         -- Meyerhof settlement-limited
+        n1_60cs DOUBLE, crr DOUBLE,       -- liquefaction (gated)
+        source VARCHAR, confidence DOUBLE,
+        PRIMARY KEY (boring_id, interval_index)
+    )""",
+
     # ---- covariates: SSURGO tabular (SDA) -----------------------------------
     """
     CREATE TABLE IF NOT EXISTS ssurgo_mapunit (

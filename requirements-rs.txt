@@ -1,0 +1,7 @@
+# Build-time dependency for the soilbot-rs PyO3 extension.
+# One-time toolchain bootstrap (outside pip):
+#   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+# Then build into the active venv:
+#   pip install -r requirements-rs.txt
+#   (cd soilbot-rs && maturin develop --release)
+maturin>=1.7,<2.0

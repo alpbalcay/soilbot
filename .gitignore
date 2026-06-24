@@ -19,7 +19,14 @@ data/ml/
 # venv
 .venv/
 
-# Logs
-logs/*.log
+# Rust extension (soilbot-rs): keep src/Cargo.toml/Cargo.lock, ignore build output
+soilbot-rs/target/
+*.so
+
+# Logs + run output (structured logs, OCR/B1 progress, watcher state)
+logs/
+
+# Claude Code local state
+.claude/
 
 # Generated reports are kept in-repo intentionally (schema_audit.md, REPORT.md)

@@ -1,0 +1,28 @@
+[package]
+name = "soilbot-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust data-engineering + geotechnical soil-equation engine for soilbot"
+
+[lib]
+name = "soilbot_rs"
+crate-type = ["cdylib"]
+
+[features]
+# Enabled by maturin for the wheel build; left OFF for `cargo test` so the test harness can
+# link libpython and exercise the pure-math units.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["abi3-py311"] }
+numpy = "0.29"
+ndarray = "0.17"
+kiddo = "5"
+spade = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rayon = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

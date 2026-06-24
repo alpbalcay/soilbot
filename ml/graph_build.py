@@ -56,8 +56,23 @@ def _load_union_units(con) -> dict:
     return units
 
 
-def _add_label_boring_edges(edges: dict, ids, xy, types, k: int) -> int:
+def _add_label_boring_edges(edges: dict, ids, xy, types, k: int, use_rust: bool = False,
+                            log=None) -> int:
     """Add `label_boring` edges from each label to its k nearest borings (in feet)."""
+    if use_rust:
+        try:
+            import soilbot_rs
+            new = soilbot_rs.label_boring_edges(
+                list(ids), np.ascontiguousarray(xy, dtype=float), dict(types), int(k))
+            added = 0
+            for key, w in new.items():
+                if key not in edges:
+                    edges[key] = w
+                    added += 1
+            return added
+        except ImportError:
+            if log:
+                log.warning("rust_unavailable_fallback_scipy")
     b_idx = [i for i, nid in enumerate(ids) if types[nid] == "boring"]
     l_idx = [i for i, nid in enumerate(ids) if types[nid] == "label"]
     if not b_idx or not l_idx:
@@ -99,7 +114,8 @@ def build_union_edges(con, config: Config, log) -> dict:
     # boring neighbourhood at hop 1 (a kriging/IDW-style neighbourhood), so the covariate-rich
     # boring cloud always informs the labels. Distinct edge_type -> independently ablatable.
     n_bridge = _add_label_boring_edges(edges, ids, xy, types,
-                                       k=int(config.get("ml", "cross_k", default=6)))
+                                       k=int(config.get("ml", "cross_k", default=6)),
+                                       use_rust=bool(g.get("use_rust", False)), log=log)
     log.info("label_boring_bridge", edges=n_bridge,
              k=int(config.get("ml", "cross_k", default=6)))
 

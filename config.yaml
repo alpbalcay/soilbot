@@ -75,7 +75,9 @@ graph:
   delaunay: true
   same_geology_edges: true
   same_geology_radius_m: 2000   # cap so a large surficial unit doesn't form a clique
+  same_geology_k: 26            # neighbour cap for the radius scan (matches scipy default)
   use_scipy: true               # false -> DuckDB RTREE/ST_DWithin kNN fallback (no Delaunay)
+  use_rust: false               # true -> soilbot_rs (kiddo/spade); identical up to equidistant ties
 
 # ---- Bayesian GNN experimentation (ml/ package) -----------------------------
 ml:
@@ -83,6 +85,8 @@ ml:
   seed: 1337
   device: cuda                  # falls back to cpu if CUDA unavailable
   union_edges_parquet: data/ml/union_edges.parquet
+  use_rust: false               # true -> soilbot_rs.assemble_features (bit-identical to numpy)
+  cross_k: 6                    # label_boring bridge: k nearest borings per label
   model:
     hidden: 128
     layers: 3
@@ -111,6 +115,32 @@ ml:
     ssurgo_prior_weight: 1.0
   predict:
     grid_step_ft: 2000
+
+# ---- Geotechnical soil-equation engine (soilbot_rs; computes strata_derived) ----------
+# Turns raw OCR'd strata (depth + SPT-N + USCS) into corrected/derived engineering properties:
+# effective stress, N60/(N1)60, friction angle, relative density, undrained shear strength,
+# stiffness, bearing, liquefaction. Most NJDOT borings lack lab Atterberg/fines/hammer data, so
+# unit weight and plasticity default by USCS class (literature tables; override per row here).
+soil_engine:
+  enabled: false                # gate: run the derive phase
+  depth_step_ft: 1.0            # integration step for the σ'v0 profile
+  water_unit_weight_pcf: 62.4
+  default_unit_weight_pcf: 120  # used where USCS is unknown
+  spt:
+    energy_ratio_pct: 60        # target N60 standard
+    hammer_efficiency_pct: 60   # NJDOT default (no hammer record) -> CE = 60/60 = 1.0
+    borehole_diam_in: 4.0       # CB (Skempton)
+    rod_length_corrections: true
+    sampler_liner: false        # liner-room without liner -> CS = 1.2
+    cn_cap: 1.7                 # Liao & Whitman overburden cap
+  unit_weight_by_uscs: {}       # pcf overrides, e.g. {SP: 118, CL: 115}; empty -> built-in table
+  plasticity_defaults_by_uscs: {}  # {CL: {pi: 15, fines_pct: 85}, ...}; empty -> built-in table
+  bearing:
+    footing_width_ft: 5.0       # Meyerhof allowable-bearing reference footing
+  liquefaction:
+    enabled: false              # stretch: (N1)60cs + CRR (Idriss-Boulanger); granular+saturated
+    magnitude: 6.0
+    pga_g: 0.15
 
 # Heavy/slow steps — OFF by default; enabled by CLI flags (--download-logs / --ocr / --dem).
 gates:

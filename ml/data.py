@@ -117,6 +117,25 @@ def _encode(vocab, v) -> int:
     return vocab.get(str(v), 1)
 
 
+def _rust_assemble_features(xy, elev, freqs, config, log):
+    """Assemble numeric node features with soilbot_rs when `ml.use_rust` is on. Returns
+    (x_num, x_mask, x_mean, x_scale, elev_mean, elev_std) or None to use the numpy path.
+    Bit-identical to the numpy block (validated by tests/parity_rust.py)."""
+    if not (config and config.get("ml", "use_rust", default=False)):
+        return None
+    try:
+        import soilbot_rs
+    except ImportError:
+        if log:
+            log.warning("rust_unavailable_fallback_numpy")
+        return None
+    x_num, x_mask, stats = soilbot_rs.assemble_features(
+        np.ascontiguousarray(xy, dtype=float),
+        np.ascontiguousarray(elev, dtype=float), list(freqs))
+    return (x_num, x_mask, np.asarray(stats["x_mean"]), float(stats["x_scale"]),
+            float(stats["elev_mean"]), float(stats["elev_std"]))
+
+
 def build_dataset(con, config: Config, log=None) -> Dataset:
     cols = ["id", "node_type", "x", "y", "surficial_unit", "surficial_lithology",
             "surficial_age", "bedrock_unit", "bedrock_lithology", "ssurgo_component",
@@ -144,23 +163,29 @@ def build_dataset(con, config: Config, log=None) -> Dataset:
     cat_cardinalities = [len(vocabs[c]) for c in CAT_COLS]
 
     # ---- numerics: normalized coords + multi-scale Fourier coords + elevation ----
-    x_mean = xy.mean(0); x_scale = xy.std(0).max() or 1.0  # shared scale preserves aspect
-    coords = (xy - x_mean) / x_scale
-    elev = np.asarray([np.nan if v is None else float(v) for v in R["elevation"]])
-    elev_present = ~np.isnan(elev)
-    elev_mean = elev[elev_present].mean() if elev_present.any() else 0.0
-    elev_std = elev[elev_present].std() if elev_present.any() else 1.0
-    elev_norm = np.where(elev_present, (np.nan_to_num(elev) - elev_mean) / (elev_std or 1.0), 0.0)
     # Fourier positional features let the GNN represent smooth spatial trend (a plain coord
     # pair under-serves it vs RF, which splits freely on x/y). Frequencies span coarse->fine.
-    fourier = []
-    for f in (0.5, 1.0, 2.0, 4.0, 8.0):
-        fourier.append(np.sin(f * coords[:, 0])); fourier.append(np.cos(f * coords[:, 0]))
-        fourier.append(np.sin(f * coords[:, 1])); fourier.append(np.cos(f * coords[:, 1]))
-    feats = [coords[:, 0], coords[:, 1], elev_norm] + fourier
-    masks = [np.ones(n), np.ones(n), elev_present.astype(float)] + [np.ones(n)] * len(fourier)
-    x_num = np.stack(feats, axis=1).astype(np.float32)
-    x_mask = np.stack(masks, axis=1).astype(np.float32)
+    _FREQS = (0.5, 1.0, 2.0, 4.0, 8.0)
+    elev = np.asarray([np.nan if v is None else float(v) for v in R["elevation"]])
+    _rust_feats = _rust_assemble_features(xy, elev, _FREQS, config, log)
+    if _rust_feats is not None:
+        x_num, x_mask, x_mean, x_scale, elev_mean, elev_std = _rust_feats
+    else:
+        x_mean = xy.mean(0); x_scale = xy.std(0).max() or 1.0  # shared scale preserves aspect
+        coords = (xy - x_mean) / x_scale
+        elev_present = ~np.isnan(elev)
+        elev_mean = elev[elev_present].mean() if elev_present.any() else 0.0
+        elev_std = elev[elev_present].std() if elev_present.any() else 1.0
+        elev_norm = np.where(elev_present,
+                             (np.nan_to_num(elev) - elev_mean) / (elev_std or 1.0), 0.0)
+        fourier = []
+        for f in _FREQS:
+            fourier.append(np.sin(f * coords[:, 0])); fourier.append(np.cos(f * coords[:, 0]))
+            fourier.append(np.sin(f * coords[:, 1])); fourier.append(np.cos(f * coords[:, 1]))
+        feats = [coords[:, 0], coords[:, 1], elev_norm] + fourier
+        masks = [np.ones(n), np.ones(n), elev_present.astype(float)] + [np.ones(n)] * len(fourier)
+        x_num = np.stack(feats, axis=1).astype(np.float32)
+        x_mask = np.stack(masks, axis=1).astype(np.float32)
 
     # ---- targets (label nodes only) ----
     code_vocab = {}

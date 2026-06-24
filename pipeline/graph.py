@@ -34,12 +34,36 @@ def _canon(a: str, b: str):
     return (a, b) if a < b else (b, a)
 
 
+def _rust_edges(ids: list, xy: np.ndarray, units: dict, g: dict, log):
+    """Build edges with the soilbot_rs extension when `graph.use_rust` is on and the module
+    is importable; returns None to fall back to the scipy path. Output is identical up to
+    equidistant-neighbour tie-breaking (validated by tests/parity_rust.py)."""
+    if not g.get("use_rust", False):
+        return None
+    try:
+        import soilbot_rs
+    except ImportError:
+        log.warning("rust_unavailable_fallback_scipy")
+        return None
+    edges = soilbot_rs.compute_edges(
+        list(ids), np.ascontiguousarray(xy, dtype=float),
+        {k: v for k, v in units.items() if v is not None},
+        int(g["knn_k"]), bool(g.get("delaunay", True)),
+        bool(g.get("same_geology_edges", True)),
+        float(g.get("same_geology_radius_m", 2000)), int(g.get("same_geology_k", 26)))
+    log.info("rust_edges", nodes=len(ids), edges=len(edges))
+    return edges
+
+
 def compute_edges(ids: list, xy: np.ndarray, units: dict, g: dict, log) -> dict:
     """Pure edge construction over arbitrary nodes (reused by the boring graph and the
     ML borings∪soil_labels union graph). `ids` are node ids, `xy` their projected
     coordinates in feet (metric-correct kNN), `units` maps id -> surficial unit (for
     same_geology edges), `g` is the graph config block. Returns {(a,b,type): weight}.
     """
+    rust = _rust_edges(ids, xy, units, g, log)
+    if rust is not None:
+        return {k: v for k, v in rust.items() if k[0] != k[1]}
     n = len(ids)
     k = int(g["knn_k"])
     edges: dict[tuple, float] = {}

@@ -5,13 +5,14 @@
     python -m pipeline.run --phase 3 --download-logs [--ocr]   # GATED scanned-log crawl / OCR
     python -m pipeline.run --phase 4 [--dem]                   # covariates (geology, SSURGO[, DEM])
     python -m pipeline.run --phase 5        # node_features + edges.parquet + REPORT.md
+    python -m pipeline.run --phase 6        # geotechnical soil-equation engine -> strata_derived
     python -m pipeline.run --phase all      # default scope: 1, 2, 4, 5 (heavy steps stay gated)
 """
 from __future__ import annotations
 
 import argparse
 
-from . import covariates, db, extract, graph, parse_logs, report, schema_audit
+from . import covariates, db, derive, extract, graph, parse_logs, report, schema_audit
 from .arcgis import ArcGISClient
 from .config import Config
 from .logging_setup import new_run_id, setup
@@ -21,9 +22,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pipeline.run",
         description="Extract NJDOT GDMS geotechnical boring data into a GNN-ready store.")
-    p.add_argument("--phase", required=True, choices=["1", "2", "3", "4", "5", "all"],
+    p.add_argument("--phase", required=True, choices=["1", "2", "3", "4", "5", "6", "all"],
                    help="pipeline phase to run (or 'all' for 1,2,4,5)")
     p.add_argument("--config", default=None, help="path to config.yaml (default: project root)")
+    p.add_argument("--use-rust", action="store_true",
+                   help="force the soilbot_rs path for graph/feature build (overrides config flags)")
     p.add_argument("--no-gpkg", action="store_true", help="phase 2: skip GeoPackage export")
     p.add_argument("--download-logs", action="store_true",
                    help="phase 3: crawl scanned-log PDFs (heavy, ~3-4 GB)")
@@ -38,6 +41,9 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
     config = Config.load(args.config)
+    if args.use_rust:  # CLI override: flip the soilbot_rs flags on for this run
+        config.d.setdefault("graph", {})["use_rust"] = True
+        config.d.setdefault("ml", {})["use_rust"] = True
     run_id = new_run_id()
 
     def logger(filename: str, phase: str):
@@ -70,8 +76,11 @@ def main(argv=None) -> int:
         graph.run(config, logger("extract.log", "phase5"))
         report.run(config, logger("extract.log", "report"))
 
+    def phase6():
+        derive.run(config, logger("parse.log", "phase6"))
+
     plan = {"1": [phase1], "2": [phase2], "3": [phase3], "4": [phase4], "5": [phase5],
-            "all": [phase1, phase2, phase4, phase5]}
+            "6": [phase6], "all": [phase1, phase2, phase4, phase5]}
     for fn in plan[args.phase]:
         fn()
     return 0
