@@ -134,9 +134,15 @@ fn process_group(rows: &[Row], p: &SoilEngineParams, out: &mut Out) {
             out.n60.push(Some(n60));
             out.cn.push(Some(cn));
             out.n1_60.push(Some(n1_60));
-            out.e_mod.push(Some(geotech::youngs_modulus(n1_60, uscs)));
-            out.m_con
-                .push(Some(geotech::constrained_modulus(geotech::youngs_modulus(n1_60, uscs))));
+            // Strength/stiffness are linear in N and collapse to a physically meaningless 0 at
+            // N=0 (a clay does not have zero Su, nor a soil zero modulus). Emit NULL there rather
+            // than a misleading 0; Dr=0% (loosest state), φ′ (loose-soil angle) and the allowable
+            // bearing (≈0 capacity) are all defensible at N=0, so those stay populated.
+            let strength_ok = n60 > 0.0;
+            out.e_mod.push(strength_ok.then(|| geotech::youngs_modulus(n1_60, uscs)));
+            out.m_con.push(
+                strength_ok.then(|| geotech::constrained_modulus(geotech::youngs_modulus(n1_60, uscs))),
+            );
             out.bearing
                 .push(Some(geotech::meyerhof_bearing(n60, p.bearing.footing_width_ft)));
 
@@ -149,7 +155,7 @@ fn process_group(rows: &[Row], p: &SoilEngineParams, out: &mut Out) {
                 out.phi_hat.push(None);
                 out.dr.push(None);
             }
-            if cohesive {
+            if cohesive && strength_ok {
                 let pi = p.plasticity_for(uscs).pi;
                 out.su.push(Some(geotech::su_stroud(n60, pi)));
             } else {

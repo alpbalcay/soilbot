@@ -87,13 +87,13 @@ def main():
     bad_phi = con.execute(
         "SELECT COUNT(*) FROM strata_derived WHERE phi_peck_deg < 20 OR phi_peck_deg > 45"
     ).fetchone()[0]
-    # Su = f1·N60 is ≥ 0 by construction; it is exactly 0 only at spt_n = 0 (very soft soil, where
-    # the Stroud correlation degenerates). Negative Su would signal a real defect.
+    # Su = f1·N60 is ≥ 0; the engine emits NULL (not a misleading 0) at spt_n = 0 where the Stroud
+    # correlation degenerates, so any non-NULL Su should be > 0. Negative Su would signal a defect.
     bad_su = con.execute(
-        "SELECT COUNT(*) FROM strata_derived WHERE su_tsf IS NOT NULL AND su_tsf < 0").fetchone()[0]
+        "SELECT COUNT(*) FROM strata_derived WHERE su_tsf IS NOT NULL AND su_tsf <= 0").fetchone()[0]
     for name, bad in [("eff>total or eff<=0", bad_stress), ("σ'v0 non-monotone", bad_mono),
                       ("Dr out of [0,100]", bad_dr),
-                      ("phi out of [20,45]", bad_phi), ("Su<0", bad_su)]:
+                      ("phi out of [20,45]", bad_phi), ("Su<=0", bad_su)]:
         status = "ok  " if bad == 0 else "FAIL"
         if bad:
             ok = False
