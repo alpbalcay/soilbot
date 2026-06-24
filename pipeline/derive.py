@@ -51,7 +51,8 @@ def build_derived(con, config: Config, log) -> dict:
         return {"rows": 0}
 
     boring_id = [r[0] for r in rows]
-    interval_index = [int(r[1]) if r[1] is not None else 0 for r in rows]
+    # interval_index is part of strata's PRIMARY KEY (boring_id, interval_index) -> never NULL.
+    interval_index = [int(r[1]) for r in rows]
     cfg_json = json.dumps(config.get("soil_engine", default={}) or {})
     out = soilbot_rs.soil_profile(
         boring_id, interval_index,

@@ -87,6 +87,18 @@ def _compare_edges(name, py_edges, rs_edges, distfn, weight_atol=1e-6,
         ok = ok and good
         print(f"  {'ok  ' if good else 'FAIL'} [{name}/weights] max |Δweight| over "
               f"{len(shared)} shared = {maxdiff:.2e}")
+    # diverging (tie/joggle) edges aren't in `shared`; verify their stored weight directly against
+    # the distance formula — an independent oracle so a weight bug that also shifts edge selection
+    # can't slip through the shared-only comparison. (same_geology weight is a flat 1.0 by design.)
+    def _wexp(e):
+        return round(1.0 / (1.0 + distfn(e[0], e[1])), 6)
+    bad = sum(1 for wmap, only in ((py_w, py_keys - rs_keys), (rs_w, rs_keys - py_keys))
+              for e in only if e[2] != "same_geology" and abs(wmap[e] - _wexp(e)) > weight_atol)
+    if py_keys ^ rs_keys:
+        good = bad == 0
+        ok = ok and good
+        print(f"  {'ok  ' if good else 'FAIL'} [{name}/diverging-weights] "
+              f"{bad} of {len(py_keys ^ rs_keys)} disagree with 1/(1+d)")
     return ok
 
 

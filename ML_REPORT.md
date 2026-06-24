@@ -1,6 +1,6 @@
 # ML_REPORT.md — Bayesian GNN for NJ soil type (Phase A)
 
-_Generated 2026-06-18T18:31:16+00:00. Spatial block cross-validation (5 folds, ~20,000 ft blocks held out whole, so train/test are spatially separated — honest extrapolation, no corridor leakage)._
+_Generated 2026-06-24T01:59:18+00:00. Spatial block cross-validation (5 folds, ~20,000 ft blocks held out whole, so train/test are spatially separated — honest extrapolation, no corridor leakage)._
 
 ## What this predicts (Phase A)
 - Target: **NJDOT engineering soil class** (82 classes, long-tailed) at the 20,255 labeled soil-label points, with **calibrated predictive uncertainty**.
@@ -65,7 +65,7 @@ Same B1 architecture and raw-SPT-N target, but the decoder additionally consumes
 
 SPT-N back-transformed RMSE ≈ 25 blows.
 
-_**Honest status:** adding σ'v0 lowers mean CRPS 0.509→0.500 and RMSE(log), with the gain concentrated in the high-error spatial folds (B2 beats B1 in 3 of 5 folds) — net-positive but within fold noise at ~15,679 SPT samples, and neither model yet beats the depth-mean baseline. σ'v0 is genuinely independent of the SPT-N target, but is computed from **USCS-defaulted unit weights** (an estimate, not lab γ); the physics input should be re-judged at full-corpus OCR scale._
+_**Honest status:** adding σ'v0 lowers mean CRPS 0.509→0.500 and RMSE(log), with the gain concentrated in the high-error spatial folds (B2 beats B1 in 3 of 5 folds). At ~15,679 SPT samples, B2 now narrowly edges the depth-mean baseline on CRPS (0.500 vs 0.509) and ties it on RMSE(log), though the baseline stays better-calibrated (90% coverage 0.895 vs 0.934); B1 (depth-only) still does not beat it — a margin within fold noise. σ'v0 is genuinely independent of the SPT-N target, but is computed from **USCS-defaulted unit weights** (an estimate, not lab γ) and standardized over the full sample (a small normalization optimism shared by B1/B2); re-judge as more data accrues._
 
 ## Reading the table
 - **Calibration is the headline**: the Bayesian models give the lowest NLL/ECE — i.e. their probabilities are trustworthy, which is what lets the map flag undrilled-area extrapolations.

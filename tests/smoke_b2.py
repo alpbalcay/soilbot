@@ -52,7 +52,7 @@ def main():
         config.d["duckdb"]["path"] = os.path.abspath(dbp)
 
     # need strata + a Phase-A dataset.pt; populate strata_derived if absent/empty
-    con = duckdb.connect(str(config.duckdb_path), read_only=False)
+    con = duckdb.connect(str(config.duckdb_path), read_only=True)
     con.execute(f"SET extension_directory='{config.extension_dir}'"); con.execute("LOAD spatial")
     n_strata = con.execute("SELECT COUNT(*) FROM strata").fetchone()[0]
     con.close()
@@ -76,12 +76,14 @@ def main():
         P = d3.sample_phys.shape[1]
         subset = set(d3.phys_cols or []) <= set(SAFE_PHYS_COLS)
         finite = bool(np.isfinite(d3.sample_phys.numpy()).all())
+        # σ'v0 needs only depth+γ (no SPT), so once strata_derived is built nearly every sample
+        # should carry it; a low number signals a broken join/alignment, not just sparse SPT.
         cov = float(d3.sample_phys_mask[:, 0].float().mean())
         print(f"  {'ok  ' if subset else 'FAIL'} phys_cols⊆SAFE = {d3.phys_cols}")
         print(f"  {'ok  ' if finite else 'FAIL'} sample_phys finite (no NaN/inf), shape "
               f"{tuple(d3.sample_phys.shape)}")
-        print(f"  {'ok  ' if cov > 0 else 'FAIL'} σ'v0 coverage over samples = {cov:.2%}")
-        ok = ok and subset and finite and cov > 0
+        print(f"  {'ok  ' if cov > 0.5 else 'FAIL'} σ'v0 coverage over samples = {cov:.2%} (>50%)")
+        ok = ok and subset and finite and cov > 0.5
 
         # (3) model decoder accepts the physics block and yields the right shapes
         import torch
