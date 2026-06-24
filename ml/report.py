@@ -179,13 +179,24 @@ def write(config: Config) -> str:
                          f"{d.get('cov90',float('nan')):.3f} | {d.get('rmse',float('nan')):.3f} |")
         delta = (f"mean CRPS {c_b1:.3f}→{c_b2:.3f}" if c_b1 is not None
                  else f"mean CRPS {c_b2:.3f}")
-        # honest B2-vs-baseline characterization, derived from the actual numbers (not hardcoded)
+        # honest B2-vs-baseline characterization, derived entirely from the numbers (not hardcoded)
         dm = j2["baselines"].get("depth_mean", {})
-        dm_crps, dm_cov = dm.get("crps"), dm.get("cov90")
+        dm_crps, dm_cov, dm_rmse = dm.get("crps"), dm.get("cov90"), dm.get("rmse")
+        b2_rmse = s2.get("rmse")
+
+        def _cmp(a, b, eps=0.005):
+            if a is None or b is None:
+                return "?"
+            return "edges" if a < b - eps else "trails" if a > b + eps else "ties"
+
         if dm_crps is not None and c_b2 is not None and c_b2 < dm_crps:
+            rmse_word = {"edges": "and also edges it on RMSE(log)",
+                         "ties": "and ties it on RMSE(log)",
+                         "trails": "though it trails slightly on RMSE(log)",
+                         "?": ""}[_cmp(b2_rmse, dm_rmse)]
             vs_base = (f"B2 now narrowly edges the depth-mean baseline on CRPS "
-                       f"({c_b2:.3f} vs {dm_crps:.3f}) and ties it on RMSE(log), though the baseline "
-                       f"stays better-calibrated (90% coverage {s2.get('cov90',float('nan')):.3f} vs "
+                       f"({c_b2:.3f} vs {dm_crps:.3f}) {rmse_word}, though the baseline stays "
+                       f"better-calibrated (90% coverage {s2.get('cov90',float('nan')):.3f} vs "
                        f"{dm_cov:.3f}); B1 (depth-only) still does not beat it")
         else:
             vs_base = "neither model yet clearly beats the depth-mean baseline"

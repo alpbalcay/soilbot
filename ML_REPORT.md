@@ -1,6 +1,6 @@
 # ML_REPORT.md — Bayesian GNN for NJ soil type (Phase A)
 
-_Generated 2026-06-24T01:59:18+00:00. Spatial block cross-validation (5 folds, ~20,000 ft blocks held out whole, so train/test are spatially separated — honest extrapolation, no corridor leakage)._
+_Generated 2026-06-24T15:02:49+00:00. Spatial block cross-validation (5 folds, ~20,000 ft blocks held out whole, so train/test are spatially separated — honest extrapolation, no corridor leakage)._
 
 ## What this predicts (Phase A)
 - Target: **NJDOT engineering soil class** (82 classes, long-tailed) at the 20,255 labeled soil-label points, with **calibrated predictive uncertainty**.
@@ -44,13 +44,13 @@ Depth-conditioned decoder on the spatial GNN latent, trained on OCR'd 'Blows on 
 
 | Predictor | SPT-N CRPS ↓ | 90% coverage | RMSE (log) |
 |---|--:|--:|--:|
-| B1 3D GNN | 0.509 | 0.889 | 0.913 |
-| baseline: depth_mean | 0.509 | 0.934 | 0.902 |
-| baseline: geology_depth_gbm | 0.526 | 0.737 | 0.910 |
+| B1 3D GNN | 0.509 | 0.898 | 0.911 |
+| baseline: depth_mean | 0.509 | 0.937 | 0.908 |
+| baseline: geology_depth_gbm | 0.528 | 0.760 | 0.929 |
 
-USCS-at-depth: macro-F1 0.102. SPT-N back-transformed RMSE ≈ 25 blows.
+USCS-at-depth: macro-F1 0.098. SPT-N back-transformed RMSE ≈ 25 blows.
 
-_**Honest status:** at the current OCR scale (~15,679 SPT samples across the spatial folds) the 3D GNN **underperforms a depth-mean baseline** — a heteroscedastic Bayesian model over-fits with this few spatially-CV'd samples. The pipeline (depth conditioning, calibrated SPT intervals, baselines) is validated end-to-end; broader OCR coverage is still needed for the GNN to pay its way. **OCR'd SPT-N values carry digit-error noise** (sanity-gated to 0–100 blows, 0–200 ft); a hand-labeled gold set is still owed before trusting individual N._
+_**Honest status:** at the current OCR scale (~17,014 SPT samples across the spatial folds) the 3D GNN **underperforms a depth-mean baseline** — a heteroscedastic Bayesian model over-fits with this few spatially-CV'd samples. The pipeline (depth conditioning, calibrated SPT intervals, baselines) is validated end-to-end; broader OCR coverage is still needed for the GNN to pay its way. **OCR'd SPT-N values carry digit-error noise** (sanity-gated to 0–100 blows, 0–200 ft); a hand-labeled gold set is still owed before trusting individual N._
 
 ## B2 — physics-grounded inputs (effective stress)
 
@@ -58,14 +58,14 @@ Same B1 architecture and raw-SPT-N target, but the decoder additionally consumes
 
 | Predictor | SPT-N CRPS ↓ | 90% coverage | RMSE (log) |
 |---|--:|--:|--:|
-| B2 3D GNN (+σ'v0) | 0.500 | 0.895 | 0.902 |
-| B1 3D GNN (depth only) | 0.509 | 0.889 | 0.913 |
-| baseline: depth_mean | 0.509 | 0.934 | 0.902 |
-| baseline: geology_depth_phys_gbm | 0.523 | 0.705 | 0.900 |
+| B2 3D GNN (+σ'v0) | 0.499 | 0.905 | 0.897 |
+| B1 3D GNN (depth only) | 0.509 | 0.898 | 0.911 |
+| baseline: depth_mean | 0.509 | 0.937 | 0.908 |
+| baseline: geology_depth_phys_gbm | 0.524 | 0.741 | 0.920 |
 
 SPT-N back-transformed RMSE ≈ 25 blows.
 
-_**Honest status:** adding σ'v0 lowers mean CRPS 0.509→0.500 and RMSE(log), with the gain concentrated in the high-error spatial folds (B2 beats B1 in 3 of 5 folds). At ~15,679 SPT samples, B2 now narrowly edges the depth-mean baseline on CRPS (0.500 vs 0.509) and ties it on RMSE(log), though the baseline stays better-calibrated (90% coverage 0.895 vs 0.934); B1 (depth-only) still does not beat it — a margin within fold noise. σ'v0 is genuinely independent of the SPT-N target, but is computed from **USCS-defaulted unit weights** (an estimate, not lab γ) and standardized over the full sample (a small normalization optimism shared by B1/B2); re-judge as more data accrues._
+_**Honest status:** adding σ'v0 lowers mean CRPS 0.509→0.499 and RMSE(log), with the gain concentrated in the high-error spatial folds (B2 beats B1 in 4 of 5 folds). At ~17,014 SPT samples, B2 now narrowly edges the depth-mean baseline on CRPS (0.499 vs 0.509) and also edges it on RMSE(log), though the baseline stays better-calibrated (90% coverage 0.905 vs 0.937); B1 (depth-only) still does not beat it — a margin within fold noise. σ'v0 is genuinely independent of the SPT-N target, but is computed from **USCS-defaulted unit weights** (an estimate, not lab γ) and standardized over the full sample (a small normalization optimism shared by B1/B2); re-judge as more data accrues._
 
 ## Reading the table
 - **Calibration is the headline**: the Bayesian models give the lowest NLL/ECE — i.e. their probabilities are trustworthy, which is what lets the map flag undrilled-area extrapolations.
