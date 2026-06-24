@@ -1,6 +1,6 @@
 # ML_REPORT.md — Bayesian GNN for NJ soil type (Phase A)
 
-_Generated 2026-06-17T14:46:51+00:00. Spatial block cross-validation (5 folds, ~20,000 ft blocks held out whole, so train/test are spatially separated — honest extrapolation, no corridor leakage)._
+_Generated 2026-06-18T18:31:16+00:00. Spatial block cross-validation (5 folds, ~20,000 ft blocks held out whole, so train/test are spatially separated — honest extrapolation, no corridor leakage)._
 
 ## What this predicts (Phase A)
 - Target: **NJDOT engineering soil class** (82 classes, long-tailed) at the 20,255 labeled soil-label points, with **calibrated predictive uncertainty**.
@@ -44,13 +44,28 @@ Depth-conditioned decoder on the spatial GNN latent, trained on OCR'd 'Blows on 
 
 | Predictor | SPT-N CRPS ↓ | 90% coverage | RMSE (log) |
 |---|--:|--:|--:|
-| B1 3D GNN | 0.628 | 0.727 | 1.075 |
-| baseline: depth_mean | 0.516 | 0.938 | 0.921 |
-| baseline: geology_depth_gbm | 0.570 | 0.563 | 0.941 |
+| B1 3D GNN | 0.509 | 0.889 | 0.913 |
+| baseline: depth_mean | 0.509 | 0.934 | 0.902 |
+| baseline: geology_depth_gbm | 0.526 | 0.737 | 0.910 |
 
-USCS-at-depth: macro-F1 0.093. SPT-N back-transformed RMSE ≈ 28 blows.
+USCS-at-depth: macro-F1 0.102. SPT-N back-transformed RMSE ≈ 25 blows.
 
-_**Honest status:** at the current OCR scale (~150 spoon-format borings / ~640 SPT samples) the 3D GNN **underperforms a depth-mean baseline** — a heteroscedastic Bayesian model over-fits with so few spatially-CV'd samples. The pipeline (depth conditioning, calibrated SPT intervals, baselines) is validated end-to-end; meaningful performance needs the full-corpus OCR (~10k profiles), which is running. **OCR'd SPT-N values carry digit-error noise** (sanity-gated to 0–100 blows, 0–200 ft); a hand-labeled gold set is still owed before trusting individual N._
+_**Honest status:** at the current OCR scale (~15,679 SPT samples across the spatial folds) the 3D GNN **underperforms a depth-mean baseline** — a heteroscedastic Bayesian model over-fits with this few spatially-CV'd samples. The pipeline (depth conditioning, calibrated SPT intervals, baselines) is validated end-to-end; broader OCR coverage is still needed for the GNN to pay its way. **OCR'd SPT-N values carry digit-error noise** (sanity-gated to 0–100 blows, 0–200 ft); a hand-labeled gold set is still owed before trusting individual N._
+
+## B2 — physics-grounded inputs (effective stress)
+
+Same B1 architecture and raw-SPT-N target, but the decoder additionally consumes the **non-leaky** geotechnical context from `strata_derived`: effective vertical stress σ'v0, total stress σv0, unit weight γ, and the overburden factor CN (each a function of depth + USCS + groundwater only — **never** of SPT-N). The corrected/derived strength properties ((N1)60, φ′, Su) are pure functions of the SPT-N target and are therefore **excluded as inputs** (a code-level allowlist/denylist enforces this).
+
+| Predictor | SPT-N CRPS ↓ | 90% coverage | RMSE (log) |
+|---|--:|--:|--:|
+| B2 3D GNN (+σ'v0) | 0.500 | 0.895 | 0.902 |
+| B1 3D GNN (depth only) | 0.509 | 0.889 | 0.913 |
+| baseline: depth_mean | 0.509 | 0.934 | 0.902 |
+| baseline: geology_depth_phys_gbm | 0.523 | 0.705 | 0.900 |
+
+SPT-N back-transformed RMSE ≈ 25 blows.
+
+_**Honest status:** adding σ'v0 lowers mean CRPS 0.509→0.500 and RMSE(log), with the gain concentrated in the high-error spatial folds (B2 beats B1 in 3 of 5 folds) — net-positive but within fold noise at ~15,679 SPT samples, and neither model yet beats the depth-mean baseline. σ'v0 is genuinely independent of the SPT-N target, but is computed from **USCS-defaulted unit weights** (an estimate, not lab γ); the physics input should be re-judged at full-corpus OCR scale._
 
 ## Reading the table
 - **Calibration is the headline**: the Bayesian models give the lowest NLL/ECE — i.e. their probabilities are trustworthy, which is what lets the map flag undrilled-area extrapolations.

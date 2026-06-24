@@ -118,6 +118,7 @@ def write(config: Config) -> str:
         j = json.loads(b1.read_text())
         s = j["model"]["mean"].get("spt", {})
         u = j["model"]["mean"].get("uscs", {})
+        n_spt_b1 = int(round(s.get("n", 0) * len(j["model"].get("folds", []) or [1])))
         L += ["", "## B1 — 3D depth-resolved (SPT-N / USCS-at-depth)", "",
               "Depth-conditioned decoder on the spatial GNN latent, trained on OCR'd 'Blows on Spoon' "
               "split-spoon profiles (depth + SPT-N + USCS). Spatial-block CV over borings; SPT-N in "
@@ -134,12 +135,58 @@ def write(config: Config) -> str:
               f"USCS-at-depth: macro-F1 {u.get('macro_f1',float('nan')):.3f}. "
               f"SPT-N back-transformed RMSE ≈ {s.get('rmse_blows',float('nan')):.0f} blows.",
               "",
-              "_**Honest status:** at the current OCR scale (~150 spoon-format borings / ~640 SPT samples) "
-              "the 3D GNN **underperforms a depth-mean baseline** — a heteroscedastic Bayesian model over-fits "
-              "with so few spatially-CV'd samples. The pipeline (depth conditioning, calibrated SPT intervals, "
-              "baselines) is validated end-to-end; meaningful performance needs the full-corpus OCR (~10k "
-              "profiles), which is running. **OCR'd SPT-N values carry digit-error noise** (sanity-gated to "
+              f"_**Honest status:** at the current OCR scale (~{n_spt_b1:,} SPT samples across the spatial "
+              "folds) the 3D GNN **underperforms a depth-mean baseline** — a heteroscedastic Bayesian model "
+              "over-fits with this few spatially-CV'd samples. The pipeline (depth conditioning, calibrated "
+              "SPT intervals, baselines) is validated end-to-end; broader OCR coverage is still needed for "
+              "the GNN to pay its way. **OCR'd SPT-N values carry digit-error noise** (sanity-gated to "
               "0–100 blows, 0–200 ft); a hand-labeled gold set is still owed before trusting individual N._"]
+
+    # B2 — physics-grounded inputs (non-leaky effective stress)
+    b2 = out / "cv_b1_physics.json"
+    if b2.exists():
+        j2 = json.loads(b2.read_text())
+        s2 = j2["model"]["mean"].get("spt", {})
+        n_spt_b2 = int(round(s2.get("n", 0) * len(j2["model"].get("folds", []) or [1])))
+        # per-fold count of folds where B2's CRPS beats B1's (honest "is it noise?" check)
+        b2_wins = "?"
+        if b1.exists():
+            fb1 = [f["spt"]["crps"] for f in json.loads(b1.read_text())["model"]["folds"] if "spt" in f]
+            fb2 = [f["spt"]["crps"] for f in j2["model"]["folds"] if "spt" in f]
+            b2_wins = sum(a > b for a, b in zip(fb1, fb2))
+        c_b1 = (json.loads(b1.read_text())["model"]["mean"].get("spt", {}).get("crps")
+                if b1.exists() else None)
+        c_b2 = s2.get("crps")
+        L += ["", "## B2 — physics-grounded inputs (effective stress)", "",
+              "Same B1 architecture and raw-SPT-N target, but the decoder additionally consumes the "
+              "**non-leaky** geotechnical context from `strata_derived`: effective vertical stress σ'v0, "
+              "total stress σv0, unit weight γ, and the overburden factor CN (each a function of "
+              "depth + USCS + groundwater only — **never** of SPT-N). The corrected/derived strength "
+              "properties ((N1)60, φ′, Su) are pure functions of the SPT-N target and are therefore "
+              "**excluded as inputs** (a code-level allowlist/denylist enforces this).", "",
+              "| Predictor | SPT-N CRPS ↓ | 90% coverage | RMSE (log) |", "|---|--:|--:|--:|",
+              f"| B2 3D GNN (+σ'v0) | {s2.get('crps',float('nan')):.3f} | "
+              f"{s2.get('cov90',float('nan')):.3f} | {s2.get('rmse',float('nan')):.3f} |"]
+        # show the B1 (depth-only) row for direct comparison if available
+        if b1.exists():
+            sb1 = json.loads(b1.read_text())["model"]["mean"].get("spt", {})
+            L.append(f"| B1 3D GNN (depth only) | {sb1.get('crps',float('nan')):.3f} | "
+                     f"{sb1.get('cov90',float('nan')):.3f} | {sb1.get('rmse',float('nan')):.3f} |")
+        for name in ("depth_mean", "geology_depth_phys_gbm", "geology_depth_gbm"):
+            d = j2["baselines"].get(name, {})
+            if d:
+                L.append(f"| baseline: {name} | {d.get('crps',float('nan')):.3f} | "
+                         f"{d.get('cov90',float('nan')):.3f} | {d.get('rmse',float('nan')):.3f} |")
+        delta = (f"mean CRPS {c_b1:.3f}→{c_b2:.3f}" if c_b1 is not None
+                 else f"mean CRPS {c_b2:.3f}")
+        L += ["",
+              f"SPT-N back-transformed RMSE ≈ {s2.get('rmse_blows',float('nan')):.0f} blows.", "",
+              f"_**Honest status:** adding σ'v0 lowers {delta} and RMSE(log), with the gain concentrated "
+              f"in the high-error spatial folds (B2 beats B1 in {b2_wins} of 5 folds) — net-positive but "
+              f"within fold noise at ~{n_spt_b2:,} SPT samples, and neither model yet beats the depth-mean "
+              "baseline. σ'v0 is genuinely independent of the SPT-N target, but is computed from "
+              "**USCS-defaulted unit weights** (an estimate, not lab γ); the physics input should be "
+              "re-judged at full-corpus OCR scale._"]
 
     L += [
         "",

@@ -115,6 +115,9 @@ ml:
     ssurgo_prior_weight: 1.0
   predict:
     grid_step_ft: 2000
+  b1:
+    physics_features: false   # B2: add non-leaky σ'v0/σv0/γ/CN per-sample inputs (strata_derived);
+                              # raw-N target kept. (N1)60/φ′/Su are functions of spt_n -> never inputs.
 
 # ---- Geotechnical soil-equation engine (soilbot_rs; computes strata_derived) ----------
 # Turns raw OCR'd strata (depth + SPT-N + USCS) into corrected/derived engineering properties:

@@ -190,10 +190,12 @@ class SoilGNN3D(nn.Module):
     """
 
     def __init__(self, *, cat_cardinalities, num_dim, edge_types, n_uscs, n_freq=6,
-                 hidden=128, layers=3, dropout=0.2, prior_sigma=1.0, emb_dim_cap=16):
+                 hidden=128, layers=3, dropout=0.2, prior_sigma=1.0, emb_dim_cap=16,
+                 phys_dim=0):
         super().__init__()
         self.edge_types = edge_types
         self.n_freq = n_freq
+        self.phys_dim = phys_dim
         self.embs = nn.ModuleList()
         emb_total = 0
         for card in cat_cardinalities:
@@ -205,7 +207,9 @@ class SoilGNN3D(nn.Module):
             [HeteroSAGELayer(hidden, hidden, edge_types, prior_sigma) for _ in range(layers)])
         self.dropout = dropout
         depth_dim = 1 + 2 * n_freq
-        dec_in = hidden * 2 + depth_dim          # [JK latent ; γ(depth)]
+        # B2: optional non-leaky physics block (value + mask), mirroring x_num/x_mask. phys_dim=0
+        # reproduces B1 (depth-only) exactly.
+        dec_in = hidden * 2 + depth_dim + (2 * phys_dim if phys_dim else 0)  # [JK ; γ(depth) ; phys]
         self.spt_head = BayesianLinear(dec_in, 2, prior_sigma)     # μ, logσ² (log1p N space)
         self.uscs_head = BayesianLinear(dec_in, n_uscs, prior_sigma)
         self.gw_head = BayesianLinear(hidden * 2, 2, prior_sigma)  # per-boring, depth-independent
@@ -220,10 +224,15 @@ class SoilGNN3D(nn.Module):
             h = F.dropout(h, p=self.dropout, training=self.training)
         return torch.cat([h, h0], dim=1)
 
-    def decode(self, h_sel, depth_std, sample=True):
-        """h_sel [M, 2*hidden] latents for the sampled nodes; depth_std [M,1] standardized depth."""
+    def decode(self, h_sel, depth_std, phys=None, phys_mask=None, sample=True):
+        """h_sel [M, 2*hidden] latents for the sampled nodes; depth_std [M,1] standardized depth.
+        phys/phys_mask [M, phys_dim] are the optional B2 non-leaky physics features (σ'v0, σv0,
+        γ, CN) + presence mask — concatenated only when the model was built with phys_dim>0."""
         g = fourier_depth(depth_std, self.n_freq)
-        z = torch.cat([h_sel, g], dim=1)
+        parts = [h_sel, g]
+        if self.phys_dim and phys is not None:
+            parts += [phys, phys_mask]
+        z = torch.cat(parts, dim=1)
         spt = self.spt_head(z, sample)            # [M,2]
         uscs = self.uscs_head(z, sample)          # [M,n_uscs]
         return spt, uscs

@@ -45,13 +45,19 @@ def _boring_folds(d3, folds, seed, block_ft):
                              block_size_ft=block_ft, folds=folds, seed=seed)
 
 
-def train_eval(d3, cfg, device, test_fold, val_fold, fold, log=None):
+def train_eval(d3, cfg, device, test_fold, val_fold, fold, log=None, physics=False):
     mlc = cfg["ml"]; tr = mlc["train"]
     x_num = d3.x_num.to(device); x_mask = d3.x_mask.to(device); cat_idx = d3.cat_idx.to(device)
     rel = build_rel_index(d3.edge_index, d3.edge_type, len(EDGE_TYPES), device)
     s_node = d3.sample_node.to(device)
     s_depth = d3.sample_depth_std.to(device).unsqueeze(1)
     y_spt = d3.y_spt_log.to(device); y_uscs = d3.y_uscs.to(device)
+
+    # B2: non-leaky physics inputs (σ'v0/σv0/γ/CN); only when requested AND present in the dataset.
+    use_phys = bool(physics) and getattr(d3, "sample_phys", None) is not None
+    s_phys = d3.sample_phys.to(device) if use_phys else None
+    s_phys_mask = d3.sample_phys_mask.to(device) if use_phys else None
+    phys_dim = d3.sample_phys.shape[1] if use_phys else 0
 
     tr_m = (fold != test_fold) & (fold != val_fold)
     te_m = fold == test_fold
@@ -64,16 +70,21 @@ def train_eval(d3, cfg, device, test_fold, val_fold, fold, log=None):
         hidden=int(mlc["model"]["hidden"]), layers=int(mlc["model"]["layers"]),
         dropout=float(mlc["model"]["dropout"]),
         prior_sigma=float(mlc["model"]["variational"]["prior_sigma"]),
+        phys_dim=phys_dim,
     ).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=float(tr["lr"]),
                            weight_decay=float(tr["weight_decay"]))
     epochs = int(tr["epochs"]); anneal = max(1, int(epochs * float(tr["kl_anneal_frac"])))
     n_tr = int(tr_m.sum())
 
+    def _phys(idx):
+        return (s_phys[idx], s_phys_mask[idx]) if use_phys else (None, None)
+
     for ep in range(epochs):
         model.train(); opt.zero_grad()
         h = model.encode(x_num, x_mask, cat_idx, rel, sample=True)
-        spt, uscs = model.decode(h[s_node[tr_idx]], s_depth[tr_idx], sample=True)
+        p, pm = _phys(tr_idx)
+        spt, uscs = model.decode(h[s_node[tr_idx]], s_depth[tr_idx], phys=p, phys_mask=pm, sample=True)
         loss = torch.zeros((), device=device)
         ys = y_spt[tr_idx]; m = ys >= 0
         if m.any():
@@ -86,19 +97,23 @@ def train_eval(d3, cfg, device, test_fold, val_fold, fold, log=None):
         loss.backward(); opt.step()
 
     return _evaluate(model, d3, x_num, x_mask, cat_idx, rel, s_node, s_depth, y_spt, y_uscs,
-                     te_idx, device, T=int(mlc["model"]["variational"]["mc_samples_eval"]))
+                     te_idx, device, T=int(mlc["model"]["variational"]["mc_samples_eval"]),
+                     s_phys=s_phys, s_phys_mask=s_phys_mask, use_phys=use_phys)
 
 
 @torch.no_grad()
 def _evaluate(model, d3, x_num, x_mask, cat_idx, rel, s_node, s_depth, y_spt, y_uscs,
-              te_idx, device, T=30):
+              te_idx, device, T=30, s_phys=None, s_phys_mask=None, use_phys=False):
     model.eval()
     if te_idx.numel() == 0:
         return {}
+    p_te = s_phys[te_idx] if use_phys else None
+    pm_te = s_phys_mask[te_idx] if use_phys else None
     mus, vars, probs = [], [], []
     for _ in range(T):
         h = model.encode(x_num, x_mask, cat_idx, rel, sample=True)
-        spt, uscs = model.decode(h[s_node[te_idx]], s_depth[te_idx], sample=True)
+        spt, uscs = model.decode(h[s_node[te_idx]], s_depth[te_idx],
+                                 phys=p_te, phys_mask=pm_te, sample=True)
         mus.append(spt[:, 0]); vars.append(spt[:, 1].exp())
         probs.append(F.softmax(uscs, dim=1))
     mu = torch.stack(mus); aleatoric = torch.stack(vars)
@@ -121,8 +136,9 @@ def _evaluate(model, d3, x_num, x_mask, cat_idx, rel, s_node, s_depth, y_spt, y_
     return res
 
 
-def baselines(d3, fold, test_fold, val_fold):
-    """Depth-mean SPT (global) and a geology+depth gradient-boosting regressor."""
+def baselines(d3, fold, test_fold, val_fold, physics=False):
+    """Depth-mean SPT (global) and a geology+depth gradient-boosting regressor. When `physics`,
+    the GBM also gets the non-leaky σ'v0/σv0/γ/CN features — a fair foil for the B2 GNN."""
     from sklearn.ensemble import HistGradientBoostingRegressor
     y = d3.y_spt_log.numpy(); valid = y >= 0
     tr = (fold != test_fold) & (fold != val_fold) & valid
@@ -133,36 +149,45 @@ def baselines(d3, fold, test_fold, val_fold):
         mu0 = y[tr].mean(); sd0 = y[tr].std() or 1.0
         out["depth_mean"] = ev.regression_metrics(np.full(te.sum(), mu0),
                                                   np.full(te.sum(), sd0), y[te])
-        # geology+depth GBM on node features (no graph) + depth
+        # geology+depth GBM on node features (no graph) + depth [+ physics for the B2 baseline]
         nodes = d3.sample_node.numpy()
-        X = np.concatenate([d3.cat_idx.numpy()[nodes].astype(float),
-                            d3.x_num.numpy()[nodes],
-                            d3.sample_depth_std.numpy()[:, None]], axis=1)
+        feats = [d3.cat_idx.numpy()[nodes].astype(float), d3.x_num.numpy()[nodes],
+                 d3.sample_depth_std.numpy()[:, None]]
+        use_phys = bool(physics) and getattr(d3, "sample_phys", None) is not None
+        if use_phys:
+            feats += [d3.sample_phys.numpy(), d3.sample_phys_mask.numpy()]
+        X = np.concatenate(feats, axis=1)
         gbm = HistGradientBoostingRegressor(max_iter=300, random_state=0)
         gbm.fit(X[tr], y[tr]); pred = gbm.predict(X[te])
         sd = (y[tr] - gbm.predict(X[tr])).std() or 1.0
-        out["geology_depth_gbm"] = ev.regression_metrics(pred, np.full(te.sum(), sd), y[te])
+        name = "geology_depth_phys_gbm" if use_phys else "geology_depth_gbm"
+        out[name] = ev.regression_metrics(pred, np.full(te.sum(), sd), y[te])
     return out
 
 
-def run(cfg, log, folds=5):
+def run(cfg, log, folds=5, physics=None):
     device = _device(cfg)
     out = cfg.abspath(cfg.get("ml", "out_dir", default="data/ml"))
     d3 = Dataset3D.load(out / "dataset3d.pt")
+    if physics is None:
+        physics = bool(cfg.get("ml", "b1", "physics_features", default=False))
+    physics = physics and getattr(d3, "sample_phys", None) is not None
+    tag = "b2" if physics else "b1"
     seed = int(cfg.get("ml", "seed", default=1337)); torch.manual_seed(seed); np.random.seed(seed)
     block_ft = float(cfg.get("ml", "splits", "block_size_ft", default=20000))
     fold = _boring_folds(d3, folds, seed, block_ft)
-    log.info("b1_start", device=device, samples=int(len(fold)),
+    log.info(f"{tag}_start", device=device, samples=int(len(fold)), physics=physics,
+             phys_cols=getattr(d3, "phys_cols", None),
              with_spt=int((d3.y_spt_log.numpy() >= 0).sum()), folds=folds)
 
     model_res, base_res = [], []
     for tf in range(folds):
         vf = (tf + 1) % folds; t0 = time.time()
-        r = train_eval(d3, cfg, device, tf, vf, fold, log)
-        b = baselines(d3, fold, tf, vf)
+        r = train_eval(d3, cfg, device, tf, vf, fold, log, physics=physics)
+        b = baselines(d3, fold, tf, vf, physics=physics)
         model_res.append(r); base_res.append(b)
         spt = r.get("spt", {})
-        log.info("b1_fold", fold=tf, secs=round(time.time() - t0, 1),
+        log.info(f"{tag}_fold", fold=tf, secs=round(time.time() - t0, 1),
                  spt_crps=round(spt.get("crps", float("nan")), 4),
                  spt_cov90=round(spt.get("cov90", float("nan")), 3),
                  spt_rmse_blows=round(spt.get("rmse_blows", float("nan")), 1),
@@ -170,14 +195,16 @@ def run(cfg, log, folds=5):
 
     agg = _agg(model_res)
     agg_b = {}
-    for k in ("depth_mean", "geology_depth_gbm"):
+    for k in ("depth_mean", "geology_depth_gbm", "geology_depth_phys_gbm"):
         dicts = [b[k] for b in base_res if k in b]
         if dicts:
             agg_b[k] = {kk: float(np.nanmean([d[kk] for d in dicts])) for kk in dicts[0]}
-    (out / "cv_b1.json").write_text(json.dumps(
-        {"model": {"folds": model_res, "mean": agg}, "baselines": agg_b}, indent=2))
-    log.info("b1_done", **{f"spt_{k}": round(v, 4) for k, v in agg.get("spt", {}).items()})
-    return {"model": agg, "baselines": agg_b}
+    fname = "cv_b1_physics.json" if physics else "cv_b1.json"
+    (out / fname).write_text(json.dumps(
+        {"model": {"folds": model_res, "mean": agg}, "baselines": agg_b, "physics": physics},
+        indent=2))
+    log.info(f"{tag}_done", **{f"spt_{k}": round(v, 4) for k, v in agg.get("spt", {}).items()})
+    return {"model": agg, "baselines": agg_b, "physics": physics}
 
 
 def _agg(res_list):
@@ -191,12 +218,14 @@ def _agg(res_list):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("--folds", type=int, default=5)
+    ap.add_argument("--physics", action="store_true",
+                    help="B2: add non-leaky σ'v0/σv0/γ/CN per-sample inputs (-> cv_b1_physics.json)")
     args = ap.parse_args()
     cfg = Config.load(None); rid = new_run_id()
     logger = setup(cfg.path("log_dir"), "ml.log", rid, "train3d", console=True)
-    res = run(cfg, logger, folds=args.folds)
+    res = run(cfg, logger, folds=args.folds, physics=True if args.physics else None)
     s = res["model"].get("spt", {}); u = res["model"].get("uscs", {})
-    print("\n=== B1 3D depth-resolved (spatial CV) ===")
+    print(f"\n=== {'B2 (+physics)' if res.get('physics') else 'B1'} 3D depth-resolved (spatial CV) ===")
     print(f"  SPT-N: CRPS={s.get('crps',float('nan')):.3f} cov90={s.get('cov90',float('nan')):.3f} "
           f"RMSE={s.get('rmse_blows',float('nan')):.1f} MAE={s.get('mae_blows',float('nan')):.1f} blows (n={s.get('n','?')})")
     print(f"  USCS@depth: macroF1={u.get('macro_f1',float('nan')):.3f} acc={u.get('accuracy',float('nan')):.3f}")
