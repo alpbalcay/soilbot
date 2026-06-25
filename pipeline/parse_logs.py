@@ -13,6 +13,7 @@ REPORT.md can quote OCR coverage honestly.
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -24,7 +25,7 @@ import pdfplumber
 
 from . import db
 from .config import Config
-from .util import ensure_dir
+from .util import atomic_write_text, ensure_dir
 
 # USCS group symbols (ASTM D2487). Used to recognize a classification token on a line.
 USCS_CODES = {
@@ -503,43 +504,93 @@ def extract_from_pdf(pdf_path: Path, boring_id: str,
                        note="OCR produced no strata pattern (TODO: accuracy)")
 
 
-def extract_with_easyocr(pdf_path: Path, boring_id: str) -> ParseResult:
-    """Rasterize + easyocr + layout-aware parse. Coarse soil-class + elevation/GW; depth/SPT
-    are sparse (descriptive scanned logs). Status 'parsed' iff ≥1 soil row recovered."""
-    try:
-        images = _rasterize(pdf_path, max_px=3400)  # bounded at the source (no VRAM blowups)
-    except Exception as exc:  # noqa: BLE001
-        return ParseResult(boring_id, status="failed", note=f"rasterize: {exc}")
-    all_rows: list[StrataRow] = []
-    fmt = "generic"
+def _ocr_pages(pdf_path: Path) -> tuple[list[dict], bool]:
+    """Rasterize + easyocr the pages worth reading; return ([{w,h,boxes}], spoon_flag).
+
+    OCR (the GPU cost) happens ONLY here. Page 1 detects format; only the rich 'Blows on Spoon'
+    logs are OCR'd further (deep borings span pages), while non-spoon docs (plan sheets, notes)
+    stop after page 1 — the main throughput win."""
+    images = _rasterize(pdf_path, max_px=3400)  # bounded at the source (no VRAM blowups)
+    pages: list[dict] = []
     spoon = False
     try:
-        # OCR page 1, detect format. Only the rich 'Blows on Spoon' logs are worth OCR'ing
-        # further pages (deep borings continue across pages); non-spoon multi-page documents
-        # (plan sheets, notes) are stopped after page 1 — OCR is the cost, so skipping pages
-        # 2+ on non-spoon docs is the main throughput win in heavy regions.
         for i, img in enumerate(images[:4]):
             p, w, h = _prep_image(img)  # safety net if a page is still oversized
             boxes = easyocr_boxes(p)
             if i == 0:
                 spoon = is_spoon_format(boxes)
-                fmt = "spoon" if spoon else "generic"
-            if spoon:
-                rows, _ = parse_spoon_format(boxes, w, h)
-                all_rows.extend(rows)
-            else:
-                all_rows.extend(parse_boxes_to_strata(boxes, w, h))
+            pages.append({"w": w, "h": h, "boxes": boxes})
+            if not spoon:
                 break  # non-spoon: don't OCR remaining pages
-    except Exception as exc:  # noqa: BLE001
-        return ParseResult(boring_id, status="failed", note=f"easyocr: {exc}")
     finally:
         _cleanup_rasters(pdf_path)
+    return pages, spoon
+
+
+def _parse_pages(pages: list[dict], spoon: bool) -> list[StrataRow]:
+    """Box -> strata parsing (the CHEAP, fix-iterable step). Shared by the live OCR path and the
+    cache-replay path so a parser change (e.g. the USCS heuristic) re-applies without re-OCR."""
+    all_rows: list[StrataRow] = []
+    for pg in pages:
+        boxes, w, h = pg["boxes"], pg["w"], pg["h"]
+        if spoon:
+            rows, _ = parse_spoon_format(boxes, w, h)
+            all_rows.extend(rows)
+        else:
+            all_rows.extend(parse_boxes_to_strata(boxes, w, h))
     for i, r in enumerate(all_rows):
         r.interval_index = i
+    return all_rows
+
+
+def _ocr_cache_dir(pdf_path: Path) -> Path:
+    # pdfs live in data/logs/ -> cache beside them in data/ocr_cache/
+    return pdf_path.parent.parent / "ocr_cache"
+
+
+def _write_ocr_cache(cache_dir: Path, boring_id: str, pages: list[dict], spoon: bool) -> None:
+    ensure_dir(cache_dir)
+    payload = {"spoon": spoon,
+               "pages": [{"w": p["w"], "h": p["h"], "boxes": p["boxes"]} for p in pages]}
+    atomic_write_text(cache_dir / f"{boring_id}.json", json.dumps(payload))
+
+
+def extract_with_easyocr(pdf_path: Path, boring_id: str, cache_dir: Optional[Path] = None) -> ParseResult:
+    """Rasterize + easyocr + layout-aware parse. Caches the OCR boxes (data/ocr_cache/<bid>.json)
+    so later parser fixes can be re-applied via `extract_from_cache` without re-running the GPU OCR.
+    Status 'parsed' iff ≥1 soil row recovered."""
+    try:
+        pages, spoon = _ocr_pages(pdf_path)
+    except Exception as exc:  # noqa: BLE001
+        return ParseResult(boring_id, status="failed", note=f"easyocr: {exc}")
+    try:
+        _write_ocr_cache(cache_dir or _ocr_cache_dir(pdf_path), boring_id, pages, spoon)
+    except Exception:  # noqa: BLE001 — caching is best-effort; never fail the parse on it
+        pass
+    all_rows = _parse_pages(pages, spoon)
     if all_rows:
         return ParseResult(boring_id, rows=all_rows, status="parsed", source="ocr")
     return ParseResult(boring_id, status="pending", source="ocr",
                        note="OCR produced no soil rows")
+
+
+def extract_from_cache(boring_id: str, cache_dir: Path) -> Optional[ParseResult]:
+    """Re-parse a boring from its cached OCR boxes — no rasterize, no easyocr. Returns None if the
+    boring has no cache file (caller falls back to live OCR)."""
+    path = Path(cache_dir) / f"{boring_id}.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except Exception as exc:  # noqa: BLE001
+        return ParseResult(boring_id, status="failed", note=f"cache_read: {exc}")
+    pages = [{"w": p["w"], "h": p["h"], "boxes": [tuple(b) for b in p["boxes"]]}
+             for p in data.get("pages", [])]
+    all_rows = _parse_pages(pages, bool(data.get("spoon")))
+    if all_rows:
+        return ParseResult(boring_id, rows=all_rows, status="parsed", source="ocr-cache")
+    return ParseResult(boring_id, status="pending", source="ocr-cache",
+                       note="no soil rows from cached boxes")
 
 
 # ---- DB plumbing -----------------------------------------------------------
