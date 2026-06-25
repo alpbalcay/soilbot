@@ -56,12 +56,19 @@ def focal_ce(logits, target, weight, gamma=2.0):
 
 
 def train_one_fold(ds: Dataset, cfg, *, mode, test_fold, val_fold, fold, device,
-                   warm_state=None, log=None, active_rel=None, aux=False):
+                   warm_state=None, log=None, active_rel=None, aux=False, use_geotech=False):
     mlc = cfg["ml"]
     tr_cfg = mlc["train"]
     n = ds.x_num.shape[0]
     bayesian = mode in ("a2", "a3")
     use_prior = mode == "a3"
+
+    # ablation: optionally append the literature-derived geotech block to the numeric features.
+    # The model auto-sizes to num_dim, so this is the only change needed for the with/without test.
+    base_num, base_mask = ds.x_num, ds.x_mask
+    if use_geotech and getattr(ds, "x_geo", None) is not None:
+        base_num = torch.cat([ds.x_num, ds.x_geo], dim=1)
+        base_mask = torch.cat([ds.x_mask, ds.x_geo_mask], dim=1)
 
     label = (ds.y_code.numpy() >= 0)
     train_mask = label & (fold != test_fold) & (fold != val_fold)
@@ -69,7 +76,7 @@ def train_one_fold(ds: Dataset, cfg, *, mode, test_fold, val_fold, fold, device,
     test_mask = label & (fold == test_fold)
 
     # move tensors to device
-    x_num = ds.x_num.to(device); x_mask = ds.x_mask.to(device); cat_idx = ds.cat_idx.to(device)
+    x_num = base_num.to(device); x_mask = base_mask.to(device); cat_idx = ds.cat_idx.to(device)
     y_code = ds.y_code.to(device); y_fam = ds.y_family.to(device); y_dr = ds.y_drain.to(device)
     y_uscs = ds.y_uscs.to(device)
     rel_index = build_rel_index(ds.edge_index, ds.edge_type, len(EDGE_TYPES), device)
@@ -89,7 +96,7 @@ def train_one_fold(ds: Dataset, cfg, *, mode, test_fold, val_fold, fold, device,
         prior_logits = torch.from_numpy(pl).to(device)
 
     model = SoilGNN(
-        cat_cardinalities=ds.cat_cardinalities, num_dim=ds.x_num.shape[1] + ds.x_mask.shape[1],
+        cat_cardinalities=ds.cat_cardinalities, num_dim=x_num.shape[1] + x_mask.shape[1],
         n_codes=len(ds.code_classes), n_families=len(ds.family_classes),
         n_drains=len(ds.drain_classes), edge_types=EDGE_TYPES,
         hidden=int(mlc["model"]["hidden"]), layers=int(mlc["model"]["layers"]),
@@ -173,7 +180,7 @@ def evaluate(model, ds, x_num, x_mask, cat_idx, rel_index, prior_logits, mask, d
     return ev.classification_metrics(probs.cpu().numpy(), y)
 
 
-def run_cv(cfg, log, mode="a3", folds=5, active_rel=None, tag=None, aux=False):
+def run_cv(cfg, log, mode="a3", folds=5, active_rel=None, tag=None, aux=False, use_geotech=False):
     device = _device(cfg)
     out = cfg.abspath(cfg.get("ml", "out_dir", default="data/ml"))
     ds = Dataset.load(out / "dataset.pt")
@@ -196,10 +203,12 @@ def run_cv(cfg, log, mode="a3", folds=5, active_rel=None, tag=None, aux=False):
         warm = None
         if mode in ("a2", "a3"):
             a1 = train_one_fold(ds, cfg, mode="a1", test_fold=tf, val_fold=vf, fold=fold,
-                                device=device, log=None, active_rel=active_rel, aux=aux)
+                                device=device, log=None, active_rel=active_rel, aux=aux,
+                                use_geotech=use_geotech)
             warm = a1["state"]
         r = train_one_fold(ds, cfg, mode=mode, test_fold=tf, val_fold=vf, fold=fold,
-                           device=device, warm_state=warm, log=log, active_rel=active_rel, aux=aux)
+                           device=device, warm_state=warm, log=log, active_rel=active_rel, aux=aux,
+                           use_geotech=use_geotech)
         r["fold"] = tf; r["secs"] = round(time.time() - t0, 1)
         del r["state"]
         results.append(r)
@@ -237,13 +246,15 @@ if __name__ == "__main__":
     ap.add_argument("--tag", default=None, help="output name override (cv_<tag>.json)")
     ap.add_argument("--aux", action="store_true",
                     help="add the auxiliary USCS task on OCR'd borings (relabeling)")
+    ap.add_argument("--geotech", action="store_true",
+                    help="append literature-derived geotech node features (information-gain test)")
     args = ap.parse_args()
     active_rel = set(int(x) for x in args.edges.split(",")) if args.edges else None
     cfg = Config.load(None)
     rid = new_run_id()
     logger = setup(cfg.path("log_dir"), "ml.log", rid, f"train_{args.mode}", console=True)
     res = run_cv(cfg, logger, mode=args.mode, folds=args.folds,
-                 active_rel=active_rel, tag=args.tag, aux=args.aux)
+                 active_rel=active_rel, tag=args.tag, aux=args.aux, use_geotech=args.geotech)
     print(f"\n=== CV {args.mode} (spatial {args.folds}-fold) ===")
     for r in res["results"]:
         t = r["test"]

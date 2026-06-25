@@ -54,6 +54,8 @@ rate_limits:
   njdep:       {rps: 1, max_retries: 3, backoff_base_s: 30, backoff_max_s: 90, timeout_s: 90}  # mapsdep.nj.gov Incapsula WAF; burst-and-rest pacing (see covariates.geology) does the real avoidance
   attachments: {rps: 3, max_retries: 5, backoff_base_s: 1.0, backoff_max_s: 60, timeout_s: 120, concurrency: 4, max_downloads_per_run: null}
   sda:         {rps: 2, max_retries: 5, backoff_base_s: 2.0, backoff_max_s: 60, timeout_s: 180}
+  openalex:    {rps: 8, max_retries: 5, backoff_base_s: 1.0, backoff_max_s: 60, timeout_s: 30}  # polite pool (mailto); 10 rps cap
+  oa_pdf:      {rps: 2, max_retries: 3, backoff_base_s: 1.0, backoff_max_s: 30, timeout_s: 60}  # open-access PDF fetch
 
 duckdb:
   path: data/soilbot.duckdb
@@ -145,11 +147,69 @@ soil_engine:
     magnitude: 6.0
     pga_g: 0.15
 
+# ---- Literature review (Phase 7): foundational geotech papers -> properties -> vault ----------
+# Deterministic OpenAlex harvest (cited_by_count = influence); 1 hop of citation expansion to ~300
+# papers; open-access full text where available. Feeds the agent swarm that ranks soil properties
+# and the Phase-A geotech information-gain ablation. All endpoints public; no API key required.
+litreview:
+  email: "alp.balcay98@gmail.com"           # OpenAlex polite pool (mailto)
+  openalex_url: "https://api.openalex.org/works"
+  max_papers: 300                            # cap after dedup + citation ranking
+  per_seed: 25                               # top works pulled per seed query
+  hops: 1                                    # citation-expansion depth
+  min_year: 1936                             # Terzaghi's Theoretical Soil Mechanics onward
+  vault_dir: litreview/vault                 # committed Obsidian vault
+  pdf_dir: litreview/pdfs                    # gitignored OA PDFs
+  fulltext_dir: litreview/fulltext           # gitignored extracted text
+  metadata_dir: litreview/metadata           # gitignored JSON API caches
+  seeds:                                     # canonical geotech topics/authors (one OpenAlex search each)
+    - "Terzaghi one-dimensional consolidation theory"
+    - "Casagrande Atterberg limits plasticity chart"
+    - "Casagrande liquid limit soil classification"
+    - "Unified Soil Classification System USCS"
+    - "Skempton pore pressure coefficients A and B"
+    - "Skempton SPT correction N60 overburden"
+    - "Peck Hanson Thornburn foundation engineering SPT"
+    - "standard penetration test friction angle correlation sand"
+    - "Liao Whitman overburden correction factor SPT"
+    - "relative density SPT sand Gibbs Holtz"
+    - "Bolton strength dilatancy relative density friction angle"
+    - "Seed Idriss simplified procedure liquefaction"
+    - "Idriss Boulanger SPT liquefaction triggering"
+    - "Youd Idriss NCEER liquefaction resistance"
+    - "Robertson Wride cone penetration test liquefaction"
+    - "Robertson soil behaviour type CPT classification"
+    - "Schmertmann static cone settlement sand"
+    - "Mayne CPT undrained shear strength preconsolidation"
+    - "Stroud undrained shear strength SPT plasticity"
+    - "Ladd Foott SHANSEP undrained strength ratio"
+    - "Ladd stress history normalized soil engineering properties"
+    - "Mesri compression index secondary consolidation"
+    - "compression index liquid limit correlation Skempton"
+    - "Jaky coefficient earth pressure at rest K0"
+    - "Mayne Kulhawy K0 overconsolidation ratio"
+    - "Hardin Drnevich shear modulus damping soils"
+    - "small strain shear modulus Gmax void ratio"
+    - "Hazen effective grain size permeability sand"
+    - "Kozeny Carman hydraulic conductivity porosity"
+    - "Bjerrum embankment settlement soft clay"
+    - "undrained shear strength overconsolidation ratio clay"
+    - "critical state soil mechanics Roscoe Schofield"
+    - "Vesic bearing capacity foundations"
+    - "Meyerhof bearing capacity settlement footings sand"
+    - "coefficient of consolidation Taylor square root time"
+    - "soil unit weight SPT correlation"
+    - "fines content liquefaction clean sand equivalent"
+    - "plasticity index undrained strength ratio clay"
+    - "shear wave velocity SPT correlation soil"
+    - "overconsolidation ratio cone penetration clay"
+
 # Heavy/slow steps — OFF by default; enabled by CLI flags (--download-logs / --ocr / --dem).
 gates:
   download_logs: false   # ~49k PDF crawl, multi-hour, ~3-4 GB
   ocr: false             # rasterize + OCR strata extraction (no OCR engine installed yet)
   dem: false             # ~49k per-boring 3DEP identify calls
+  litreview: false       # phase 7: scrape foundational geotech papers (OpenAlex) -> lit_* + vault
 
 # Secondary scanned-log source (county roll-up PDFs). Plain HTTP; opt-in only.
 county_pdf:

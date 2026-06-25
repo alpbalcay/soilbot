@@ -22,8 +22,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="pipeline.run",
         description="Extract NJDOT GDMS geotechnical boring data into a GNN-ready store.")
-    p.add_argument("--phase", required=True, choices=["1", "2", "3", "4", "5", "6", "all"],
-                   help="pipeline phase to run (or 'all' for 1,2,4,5)")
+    p.add_argument("--phase", required=True, choices=["1", "2", "3", "4", "5", "6", "7", "all"],
+                   help="pipeline phase to run (or 'all' for 1,2,4,5; 7=literature review)")
     p.add_argument("--config", default=None, help="path to config.yaml (default: project root)")
     p.add_argument("--use-rust", action="store_true",
                    help="force the soilbot_rs path for graph/feature build (overrides config flags)")
@@ -79,8 +79,12 @@ def main(argv=None) -> int:
     def phase6():
         derive.run(config, logger("parse.log", "phase6"))
 
+    def phase7():
+        from . import litreview
+        litreview.run(config, logger("litreview.log", "phase7"), limit=args.limit)
+
     plan = {"1": [phase1], "2": [phase2], "3": [phase3], "4": [phase4], "5": [phase5],
-            "6": [phase6], "all": [phase1, phase2, phase4, phase5]}
+            "6": [phase6], "7": [phase7], "all": [phase1, phase2, phase4, phase5]}
     for fn in plan[args.phase]:
         fn()
     return 0

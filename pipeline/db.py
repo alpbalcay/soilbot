@@ -207,6 +207,41 @@ DDL: list[str] = [
         src_type VARCHAR, dst_type VARCHAR,
         PRIMARY KEY (src, dst, edge_type)
     )""",
+
+    # ---- literature review (Phase 7): foundational geotech papers + property ranking --------
+    """
+    CREATE TABLE IF NOT EXISTS lit_papers (
+        openalex_id VARCHAR PRIMARY KEY,  -- e.g. 'W2041893233'
+        doi VARCHAR, title VARCHAR, year INTEGER, authors VARCHAR, venue VARCHAR,
+        cited_by_count BIGINT,            -- influence signal
+        concepts VARCHAR,                 -- '|'-joined OpenAlex concept display names
+        abstract VARCHAR,
+        oa_url VARCHAR, has_fulltext BOOLEAN DEFAULT FALSE,
+        seed_topic VARCHAR,               -- which seed surfaced it (NULL if expansion-only)
+        hop INTEGER DEFAULT 0,            -- 0=seed result, 1=citation-expansion
+        source VARCHAR DEFAULT 'openalex'
+    )""",
+    """
+    CREATE TABLE IF NOT EXISTS lit_citations (
+        src_id VARCHAR, dst_id VARCHAR,   -- src cites dst (both openalex ids in-set)
+        PRIMARY KEY (src_id, dst_id)
+    )""",
+    """
+    CREATE TABLE IF NOT EXISTS lit_properties (
+        name VARCHAR PRIMARY KEY,         -- canonical property name
+        aliases VARCHAR, category VARCHAR,
+        influence_score DOUBLE,           -- citation-weighted across evidence papers
+        n_papers INTEGER,
+        already_derived BOOLEAN,          -- present in strata_derived
+        leaky_for_spt BOOLEAN,            -- a function of SPT-N (LEAKY_COLS family)
+        derivable_from_inputs BOOLEAN,    -- computable from depth+USCS+GW+grain-size+geology
+        formula_refs VARCHAR, notes VARCHAR
+    )""",
+    """
+    CREATE TABLE IF NOT EXISTS lit_property_links (
+        property VARCHAR, openalex_id VARCHAR, evidence VARCHAR,
+        PRIMARY KEY (property, openalex_id)
+    )""",
 ]
 
 # node_features view: created last (depends on the tables above all existing).

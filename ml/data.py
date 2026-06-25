@@ -57,6 +57,11 @@ class Dataset:
     drain_classes: list
     uscs_classes: list             # idx -> USCS family string (auxiliary task)
     cat_cardinalities: list        # per CAT_COLS vocab size (incl. MISSING/OOV)
+    # literature-derived geotech node features (non-leaky for the soil-type target); defaulted so
+    # old caches still load. Concatenated into x_num/x_mask at train time behind the --geotech flag.
+    x_geo: torch.Tensor = None     # [N, G] standardized per-boring geotech aggregates (0 where absent)
+    x_geo_mask: torch.Tensor = None  # [N, G] 1.0 where the boring has a USCS profile
+    geo_cols: list = None          # the G geotech column names
 
     def save(self, path):
         torch.save({
@@ -69,6 +74,7 @@ class Dataset:
             "code_classes": self.code_classes, "family_classes": self.family_classes,
             "drain_classes": self.drain_classes, "uscs_classes": self.uscs_classes,
             "cat_cardinalities": self.cat_cardinalities,
+            "x_geo": self.x_geo, "x_geo_mask": self.x_geo_mask, "geo_cols": self.geo_cols,
         }, path)
 
     @staticmethod
@@ -265,6 +271,12 @@ def build_dataset(con, config: Config, log=None) -> Dataset:
     edge_type = torch.from_numpy(etype)
     edge_weight = torch.from_numpy(eweight)
 
+    # literature-derived geotech node features (computed always; toggled at train time)
+    from .geotech_features import build_geo_tensors
+    x_geo_np, x_geo_mask_np, geo_cols, n_geo = build_geo_tensors(con, node_ids)
+    x_geo = torch.from_numpy(x_geo_np)
+    x_geo_mask = torch.from_numpy(x_geo_mask_np)
+
     ds = Dataset(
         node_ids=node_ids, node_type=node_type, xy=xy,
         x_num=torch.from_numpy(x_num), x_mask=torch.from_numpy(x_mask),
@@ -275,9 +287,11 @@ def build_dataset(con, config: Config, log=None) -> Dataset:
         vocabs=vocabs, code_classes=code_classes, family_classes=family_classes,
         drain_classes=drain_classes, uscs_classes=uscs_classes,
         cat_cardinalities=cat_cardinalities,
+        x_geo=x_geo, x_geo_mask=x_geo_mask, geo_cols=geo_cols,
     )
     if log:
         log.info("dataset_built", nodes=n, labels=int((node_type == 1).sum()),
+                 geo_borings=n_geo, geo_cols=len(geo_cols),
                  ocr_uscs_borings=int((y_uscs >= 0).sum()), uscs_classes=len(uscs_classes),
                  edges=int(edge_index.shape[1]), codes=len(code_classes),
                  families=len(family_classes), drains=len(drain_classes),
