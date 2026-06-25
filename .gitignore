@@ -35,4 +35,8 @@ litreview/pdfs/
 litreview/fulltext/
 litreview/metadata/
 
+# OCR gold-set validation: commit the labels + manifest + report, ignore the bulky rendered
+# page PNGs (regenerate via `python scripts/gold_sample.py`).
+gold/render/
+
 # Generated reports are kept in-repo intentionally (schema_audit.md, REPORT.md)

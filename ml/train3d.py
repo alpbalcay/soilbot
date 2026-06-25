@@ -45,7 +45,7 @@ def _boring_folds(d3, folds, seed, block_ft):
                              block_size_ft=block_ft, folds=folds, seed=seed)
 
 
-def train_eval(d3, cfg, device, test_fold, val_fold, fold, log=None, physics=False):
+def train_eval(d3, cfg, device, test_fold, val_fold, fold, log=None, physics=False, dump_preds=False):
     mlc = cfg["ml"]; tr = mlc["train"]
     x_num = d3.x_num.to(device); x_mask = d3.x_mask.to(device); cat_idx = d3.cat_idx.to(device)
     rel = build_rel_index(d3.edge_index, d3.edge_type, len(EDGE_TYPES), device)
@@ -98,12 +98,13 @@ def train_eval(d3, cfg, device, test_fold, val_fold, fold, log=None, physics=Fal
 
     return _evaluate(model, d3, x_num, x_mask, cat_idx, rel, s_node, s_depth, y_spt, y_uscs,
                      te_idx, device, T=int(mlc["model"]["variational"]["mc_samples_eval"]),
-                     s_phys=s_phys, s_phys_mask=s_phys_mask, use_phys=use_phys)
+                     s_phys=s_phys, s_phys_mask=s_phys_mask, use_phys=use_phys,
+                     dump_preds=dump_preds)
 
 
 @torch.no_grad()
 def _evaluate(model, d3, x_num, x_mask, cat_idx, rel, s_node, s_depth, y_spt, y_uscs,
-              te_idx, device, T=30, s_phys=None, s_phys_mask=None, use_phys=False):
+              te_idx, device, T=30, s_phys=None, s_phys_mask=None, use_phys=False, dump_preds=False):
     model.eval()
     if te_idx.numel() == 0:
         return {}
@@ -133,6 +134,17 @@ def _evaluate(model, d3, x_num, x_mask, cat_idx, rel, s_node, s_depth, y_spt, y_
     yu = y_uscs[te_idx]; mu_ = (yu >= 0).cpu().numpy()
     if mu_.any() and len(d3.uscs_classes) > 1:
         res["uscs"] = ev.classification_metrics(prob.cpu().numpy()[mu_], yu.cpu().numpy()[mu_])
+    if dump_preds:
+        # per-sample out-of-fold predictions for the gold-set diagnosis (boring_id from node_ids).
+        tei = te_idx.cpu().numpy()
+        s_node_np = s_node.cpu().numpy()
+        res["_preds"] = {
+            "boring_id": [str(d3.node_ids[int(s_node_np[i])])[2:] for i in tei],  # strip 'b:'
+            "depth_ft": d3.sample_depth_ft.cpu().numpy()[tei],
+            "y_ocr_log": y_spt[te_idx].cpu().numpy(),
+            "pred_mu": pred_mu.cpu().numpy(),
+            "pred_sigma": pred_var.sqrt().cpu().numpy(),
+        }
     return res
 
 
@@ -165,7 +177,7 @@ def baselines(d3, fold, test_fold, val_fold, physics=False):
     return out
 
 
-def run(cfg, log, folds=5, physics=None):
+def run(cfg, log, folds=5, physics=None, dump_preds=False):
     device = _device(cfg)
     out = cfg.abspath(cfg.get("ml", "out_dir", default="data/ml"))
     d3 = Dataset3D.load(out / "dataset3d.pt")
@@ -180,11 +192,13 @@ def run(cfg, log, folds=5, physics=None):
              phys_cols=getattr(d3, "phys_cols", None),
              with_spt=int((d3.y_spt_log.numpy() >= 0).sum()), folds=folds)
 
-    model_res, base_res = [], []
+    model_res, base_res, all_preds = [], [], []
     for tf in range(folds):
         vf = (tf + 1) % folds; t0 = time.time()
-        r = train_eval(d3, cfg, device, tf, vf, fold, log, physics=physics)
+        r = train_eval(d3, cfg, device, tf, vf, fold, log, physics=physics, dump_preds=dump_preds)
         b = baselines(d3, fold, tf, vf, physics=physics)
+        if dump_preds and "_preds" in r:
+            p = r.pop("_preds"); p["fold"] = [tf] * len(p["boring_id"]); all_preds.append(p)
         model_res.append(r); base_res.append(b)
         spt = r.get("spt", {})
         log.info(f"{tag}_fold", fold=tf, secs=round(time.time() - t0, 1),
@@ -203,6 +217,16 @@ def run(cfg, log, folds=5, physics=None):
     (out / fname).write_text(json.dumps(
         {"model": {"folds": model_res, "mean": agg}, "baselines": agg_b, "physics": physics},
         indent=2))
+    if dump_preds and all_preds:
+        # concatenate fold OOF predictions -> preds_b{1,2}.json (gitignored; for gold_diag).
+        # columnar JSON keeps this dependency-free (no pandas/pyarrow in this env).
+        cols = {}
+        for p in all_preds:
+            for k, v in p.items():
+                cols.setdefault(k, []).extend(np.asarray(v).tolist())
+        pname = "preds_b2.json" if physics else "preds_b1.json"
+        (out / pname).write_text(json.dumps(cols))
+        log.info(f"{tag}_preds", rows=len(cols["boring_id"]), file=pname)
     log.info(f"{tag}_done", **{f"spt_{k}": round(v, 4) for k, v in agg.get("spt", {}).items()})
     return {"model": agg, "baselines": agg_b, "physics": physics}
 
@@ -220,10 +244,13 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--physics", action="store_true",
                     help="B2: add non-leaky σ'v0/σv0/γ/CN per-sample inputs (-> cv_b1_physics.json)")
+    ap.add_argument("--dump-preds", action="store_true",
+                    help="also write per-sample OOF predictions to preds_b{1,2}.parquet (gold diag)")
     args = ap.parse_args()
     cfg = Config.load(None); rid = new_run_id()
     logger = setup(cfg.path("log_dir"), "ml.log", rid, "train3d", console=True)
-    res = run(cfg, logger, folds=args.folds, physics=True if args.physics else None)
+    res = run(cfg, logger, folds=args.folds, physics=True if args.physics else None,
+              dump_preds=args.dump_preds)
     s = res["model"].get("spt", {}); u = res["model"].get("uscs", {})
     print(f"\n=== {'B2 (+physics)' if res.get('physics') else 'B1'} 3D depth-resolved (spatial CV) ===")
     print(f"  SPT-N: CRPS={s.get('crps',float('nan')):.3f} cov90={s.get('cov90',float('nan')):.3f} "
