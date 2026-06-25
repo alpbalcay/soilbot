@@ -15,6 +15,10 @@ commands and the non-obvious invariants that are easy to break.
 - **`soilbot-rs/`** — Rust PyO3 extension (`soilbot_rs`): the geotechnical soil-equation engine
   plus parity-verified graph/feature construction.
 
+A **Phase 7 literature-review layer is emerging** (`pipeline/litreview.py`): an OpenAlex harvest of
+foundational geotech papers → `lit_*` tables + a committed Obsidian vault. It is gated off and not
+yet wired into `run.py` — see the Phase 7 note below.
+
 For the science and results, see `README.md`, `REPORT.md`, and `ML_REPORT.md`. This file is only
 about *how to work in the repo*.
 
@@ -51,16 +55,47 @@ Pipeline (one DuckDB store, phases gate the next):
 | 5 | `python -m pipeline.run --phase 5` | Node features + `edges.parquet` → `REPORT.md` |
 | 6 | `python -m pipeline.run --phase 6` | **GATED** soil-equation engine → `strata_derived` |
 | all | `python -m pipeline.run --phase all` | Default scope: phases 1, 2, 4, 5 (heavy 3 & 6 stay gated) |
+| 7 | *(emerging — not in `run.py`)* | **GATED** OpenAlex lit-review harvest → `lit_*` tables + Obsidian vault |
 
-`--use-rust` forces the `soilbot_rs` graph/feature path regardless of config flags.
+`--use-rust` forces the `soilbot_rs` graph/feature path regardless of config flags. The `--phase`
+argument only accepts `1`–`6` and `all`.
 
-ML (Phase B depth-resolved; GPU `device: cuda` in config, CPU fallback):
+**Phase 7 (litreview) — emerging, gated.** Not yet wired into `run.py` (no `--phase 7`); invoke the
+module directly via `pipeline.litreview.run(config, log)` and the `litreview: false` gate
+(`config.yaml`) guards it. It pulls ~40 canonical seed queries from OpenAlex (polite pool via
+`mailto`, **no API key**), expands one citation hop, ranks by `cited_by_count`, and persists to
+`lit_papers` / `lit_citations` (+ JSON metadata cache). Key config (`config.yaml` `litreview:`
+block): `max_papers: 300`, `per_seed: 25`, `hops: 1`, `min_year: 1936`. Outputs split by
+trackability: `litreview/vault` (Obsidian graph) is **committed**, while `litreview/pdfs`,
+`litreview/fulltext`, and `litreview/metadata` are **gitignored**.
+
+ML (GPU `device: cuda` in config, CPU fallback). Phase A predicts soil type at labeled points;
+Phase B is depth-resolved SPT-N + USCS.
 
 ```bash
+# Phase A (soil type @ labeled points)
+.venv/bin/python -m ml.assemble                       # A0.5 prerequisite: labeled-graph union + covariates -> ml_edges
+.venv/bin/python -m ml.train --mode a1 --folds 5      # a1 deterministic baseline (+ warm-start)
+.venv/bin/python -m ml.train --mode a2 --folds 5      # a2 Bayesian (Bayes-by-Backprop, ELBO), warm-started from a1
+.venv/bin/python -m ml.train --mode a3 --folds 5      # a3 = a2 + empirical-Bayes geology prior
+
+# Phase B (depth-resolved)
 .venv/bin/python -m ml.train3d --folds 5              # B1 (stress baseline)        -> cv_b1.json
 .venv/bin/python -m ml.train3d --physics --folds 5    # B2 (+ physics inputs)       -> cv_b1_physics.json
 .venv/bin/python -m ml.report                         # consolidate -> ML_REPORT.md
 ```
+
+## Reporting & finalization
+
+Optional helpers, run from the repo root:
+
+- `.venv/bin/python scripts/data_report.py` → `data_report.html` — a self-contained Plotly
+  dashboard built from the **live DB (read-only)** + the ML CV JSONs. Use it for current corpus
+  stats; the markdown `REPORT.md` is a stale Phase-5 snapshot. Safe against a locked DB.
+- `bash run_finish.sh` — one-shot, **resumable** finisher: loops OCR mop-up over reset-failed logs
+  until the parse count stabilizes, rebuilds the 3D dataset on the full corpus, then runs the final
+  5-fold B1; logs to `logs/finish_progress.out` / `logs/finish_ocr.out`. (Contrast
+  `scripts/auto_phase6_b2.sh`, the detached watcher below.)
 
 ## Tests
 
@@ -87,7 +122,9 @@ SOILBOT_DB=/tmp/snap.duckdb .venv/bin/python tests/smoke_soil.py
 
 - **DuckDB is single-writer.** A running pipeline/OCR job holds an exclusive lock. Never open the
   live DB read-write concurrently — use `read_only=True`, or operate on a snapshot copy via the
-  `SOILBOT_DB` env var (above). Opening read-write against a locked DB throws.
+  `SOILBOT_DB` env var (above). Opening read-write against a locked DB throws. `scripts/data_report.py`
+  respects this (opens `read_only=True`); the Phase 7 harvest reuses the shared
+  `RateLimiter`/`backoff_delay`/`manifest_*` politeness + idempotency primitives, so it is re-run-safe.
 
 - **Leakage boundary.** `spt_n` is the prediction target, so anything derived *from* it must never
   be a model input. `ml/data3d.py` encodes this:
@@ -104,15 +141,16 @@ SOILBOT_DB=/tmp/snap.duckdb .venv/bin/python tests/smoke_soil.py
   (defensible at the loosest state). `tests/smoke_soil.py` asserts `su_tsf > 0` wherever non-NULL
   — don't reintroduce 0s.
 
-- **Feature gates default OFF** in `config.yaml`: `graph.use_rust`, `ml.use_rust`,
-  `soil_engine.enabled`, `ml.b1.physics_features`. The Rust graph/feature paths are
-  parity-verified bit-for-bit against scipy/numpy; if you touch them, keep `parity_rust.py` green
-  before flipping any gate on.
+- **Feature gates default OFF** in `config.yaml`: `graph.use_rust`, `ml.use_rust` (forces the Rust
+  feature-assembly path), `soil_engine.enabled`, `ml.b1.physics_features`, and `litreview` (Phase 7).
+  The Rust graph/feature paths are parity-verified bit-for-bit against scipy/numpy; if you touch
+  them, keep `parity_rust.py` green before flipping any gate on.
 
 ## Conventions
 
 - `data/`, `logs/`, and `.claude/` are gitignored — build/run artifacts (DuckDB, parquet, `.pt`
-  caches, ML JSONs) stay local and are never committed.
+  caches, ML JSONs) stay local and are never committed. Phase 7 follows the same rule: only
+  `litreview/vault` (the Obsidian graph) is committed; `litreview/{pdfs,fulltext,metadata}` are not.
 - **Don't `git push`** unless explicitly asked. Commit to `main` with the repo's terse one-line
   message style.
 - `scripts/auto_phase6_b2.sh` is a detached, idempotent watcher that re-runs phase 6 + B1/B2 +
