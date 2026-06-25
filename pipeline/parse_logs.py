@@ -164,28 +164,51 @@ _RE_LEFT_NUM = re.compile(r"^[~\-−]?\s*(\d{1,3})$")
 
 
 def soil_family_from_text(desc: str) -> tuple[Optional[str], float]:
-    """Map a descriptive soil phrase to a coarse USCS group symbol + a confidence in [0,1]."""
+    """Map a descriptive soil phrase to a USCS group symbol + a confidence in [0,1].
+
+    Reads the gradation/plasticity/organic adjectives the logs do state so the heuristic can emit the
+    well-graded (W), high-plasticity (H), and organic (O) classes — not just the poorly-graded/
+    low-plasticity defaults. Without this, "well graded"->W, "fat"/"high plasticity"->H and
+    "organic"->O are all collapsed to P/L/PT, which is why our strata had CH=1 and zero MH/SW/GW/OH
+    (see CLASSIFICATION_KNOWLEDGE.md). Suffix is only assigned when the description states it; absent
+    a gradation cue we still default to P/L, honestly reflecting unstated gradation."""
     up = desc.upper()
     if "FILL" in up:
         return "FILL", 0.6
-    if "PEAT" in up or "ORGANIC" in up:
-        return "PT", 0.5
+    if "PEAT" in up or "MUCK" in up:
+        return "PT", 0.6
+    # descriptive cues for the suffix/prefix the base heuristic used to drop
+    high_plast = "FAT" in up or "HIGH PLAST" in up or "HIGH-PLAST" in up or "PLASTIC CLAY" in up
+    organic = "ORGANIC" in up
+    well_graded = "WELL GRADED" in up or "WELL-GRADED" in up
     if "TOPSOIL" in up:
         return "OL", 0.5
     m = _RE_PRIMARY_SOIL.search(up)
     if not m:
-        return None, 0.0
+        return ("OL", 0.4) if organic else (None, 0.0)
     primary = m.group(1)
     silty = "SILT" in up or "SILTY" in up
     clayey = "CLAY" in up or "CLAYEY" in up
     if primary == "SAND":
-        return ("SM" if silty else "SC" if clayey else "SP"), 0.45
+        if silty:
+            return "SM", 0.45
+        if clayey:
+            return "SC", 0.45
+        return ("SW", 0.5) if well_graded else ("SP", 0.45)
     if primary == "GRAVEL":
-        return ("GM" if silty else "GC" if clayey else "GP"), 0.45
+        if silty:
+            return "GM", 0.45
+        if clayey:
+            return "GC", 0.45
+        return ("GW", 0.5) if well_graded else ("GP", 0.45)
     if primary == "SILT":
-        return "ML", 0.45
+        if organic:
+            return ("OH" if high_plast else "OL"), 0.5
+        return ("MH" if high_plast else "ML"), 0.45
     if primary == "CLAY":
-        return "CH" if "FAT" in up or "HIGH PLAST" in up else "CL", 0.45
+        if organic:
+            return ("OH" if high_plast else "OL"), 0.5
+        return ("CH" if high_plast else "CL"), 0.45
     return None, 0.0
 
 
@@ -212,6 +235,46 @@ def _spt_n_from_increments(incs: list[float]) -> Optional[int]:
     return None
 
 
+# refusal: a high blow count over a partial penetration, e.g. '50/125', '100/3"', '50/25mm'.
+_RE_REFUSAL = re.compile(r"\b(\d{2,3})\s*/\s*(\d{1,3})(?:\s*(?:mm|cm|in|\"|'))?\b")
+# weight-of-rod / weight-of-hammer (N≈0). easyocr mangles 'WOR'/'WOH' -> 'Woria','Wori','Woai'.
+_RE_WOR = re.compile(r"\bW[\.\s]*O[\.\s]*[RHIA]|WEIGHT\s+OF\s+(?:ROD|HAMMER)", re.IGNORECASE)
+
+
+def _spt_from_blows(blows_text: str, band_text: str) -> tuple[Optional[int], str]:
+    """Parse the 'Blows on Spoon' field -> (spt_n, kind). kind ∈ {n, wor, refusal, none}.
+
+    Handles the three things the naive increment-sum got wrong on real logs:
+      * WOR/WOH (very soft, N≈0) — detected on the whole sample band (OCR mis-columns it),
+      * refusal '50/x' / '100/y' — emit NULL N (don't fabricate the bogus low N the old code did),
+      * recovery leakage — only integer blow counts in [0,99] count as increments (drop decimals
+        like 0.11 ft and mm values >=100).
+    """
+    if _RE_WOR.search(band_text):
+        return 0, "wor"
+    mr = _RE_REFUSAL.search(blows_text)
+    if mr and int(mr.group(1)) >= 50:
+        return None, "refusal"
+    incs = []
+    for tok in re.split(r"[|/\s]+", blows_text):
+        tok = tok.strip(".:-")
+        if re.fullmatch(r"\d{1,3}", tok):          # integer blow count only (no recovery decimals)
+            v = int(tok)
+            if v < 100:
+                incs.append(v)
+    n = _spt_n_from_increments(incs)
+    return n, ("n" if n is not None else "none")
+
+
+def _norm_sid(sid: str) -> str:
+    """Normalize a sample id to letter+digits, mapping a leading OCR-confused digit to 'S' (the
+    dominant split-spoon prefix): '5-1'->'S1', '8-3'->'S3', 'S-4'->'S4', 'J8'->'J8'."""
+    s = sid.replace("-", "")
+    if s and s[0].isdigit():
+        s = "S" + s
+    return s
+
+
 def parse_spoon_format(boxes: list[tuple], w: float, h: float) -> tuple[list[StrataRow], dict]:
     """Parser for the NJDOT 'Blows on Spoon' split-spoon log format (rich: explicit per-sample
     depth intervals + SPT blow counts). Detected by its header anchors. Columns (fractions of
@@ -231,30 +294,43 @@ def parse_spoon_format(boxes: list[tuple], w: float, h: float) -> tuple[list[Str
         except ValueError:
             pass
 
-    # anchor rows on sample ids in the sample column
-    samples = [(x, y, t) for (x, y, t, c) in boxes
-               if 0.16 * w < x < 0.24 * w and re.match(r"^[A-Z]-?\d{1,2}$", t.strip())]
+    # Anchor rows on sample ids in the sample column. easyocr routinely misreads the leading 'S'
+    # as a digit ('S-1'->'5-1', 'S-3'->'8-3'), which the old letter-only regex dropped — the main
+    # recall hole. Accept either a letter-led id ('S2', 'J8') OR any dash-form id ('5-1', '8-3'),
+    # but NOT a bare 1-2 digit casing-blow count ('81'), which has no dash and no letter.
+    _re_sid = re.compile(r"^([A-Z]-?\d{1,2}|[A-Z0-9]-\d{1,2})$")
+    samples = [(x, y, _norm_sid(t.strip())) for (x, y, t, c) in boxes
+               if 0.15 * w < x < 0.25 * w and _re_sid.match(t.strip())]
     samples.sort(key=lambda s: s[1])
     rows: list[StrataRow] = []
     for i, (sx, sy, sid) in enumerate(samples):
         band = [b for b in boxes if abs(b[1] - sy) < 70]
+        # WOR/WOH lives in the sample/blows columns; exclude the description column (x>0.56w) so a
+        # stray description word can't trigger a false N=0.
+        band_text = " ".join(b[2] for b in band if b[0] < 0.56 * w)
         depths = sorted([(b[0], v) for b in band for v in _nums_in(b[2])
                          if 0.24 * w < b[0] < 0.36 * w and v < 100], key=lambda z: z[0])
         top = depths[0][1] * to_ft if depths else None
         bot = depths[1][1] * to_ft if len(depths) > 1 else None
-        # blows: numeric increments in the spoon column (exclude recovery at x>0.53w)
-        inc = [v for b in band if 0.37 * w < b[0] < 0.53 * w for v in _nums_in(b[2])]
-        spt = _spt_n_from_increments(inc)
+        # blows: the 'Blows on Spoon' column (exclude recovery at x>0.53w); WOR/refusal aware
+        blows_text = " ".join(b[2] for b in sorted(band, key=lambda b: b[0])
+                              if 0.37 * w < b[0] < 0.53 * w)
+        spt, spt_kind = _spt_from_blows(blows_text, band_text)
         desc = " ".join(b[2] for b in sorted(band, key=lambda b: b[0]) if b[0] > 0.57 * w)
         fam, fam_conf = soil_family_from_text(desc)
+        # confidence: a clean 3-increment N is trusted most; a 1-2 increment or WOR less; a row
+        # with no depth or no/derived N least. (The old formula was ~always 1.0 — useless.)
+        n_inc = len(re.findall(r"\b\d{1,3}\b", blows_text))
+        n_conf = 0.9 if spt_kind == "n" and n_inc >= 3 else \
+            0.6 if spt_kind in ("n", "wor") else 0.3 if spt_kind == "refusal" else 0.2
+        conf = 0.15 + 0.25 * (top is not None) + 0.6 * n_conf
         rows.append(StrataRow(
             interval_index=i,
             top_depth=round(top, 2) if top is not None else None,
             bottom_depth=round(bot, 2) if bot is not None else None,
             uscs_class=fam, spt_n=spt, sample_type=sid.replace("-", ""),
             gw_depth=header["gw_depth"], elevation=header["surface_elevation"],
-            source="ocr", ocr_status="parsed",
-            confidence=round(min(1.0, 0.3 + 0.3 * (top is not None) + 0.4 * (spt is not None)), 2),
+            source="ocr", ocr_status="parsed", confidence=round(min(1.0, conf), 2),
         ))
     return rows, header
 
