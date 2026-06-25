@@ -97,6 +97,24 @@ Optional helpers, run from the repo root:
   5-fold B1; logs to `logs/finish_progress.out` / `logs/finish_ocr.out`. (Contrast
   `scripts/auto_phase6_b2.sh`, the detached watcher below.)
 
+### OCR gold-set validation (`gold/`)
+
+Independent ground truth for the OCR'd `strata` SPT-N, hand-transcribed from rendered boring-log
+PDFs. The committed artifacts (`gold/labels.jsonl`, `manifest.json`, `scores.json`, `diag.json`,
+`GOLD_VALIDATION.md`) and the pipeline:
+
+1. `python scripts/gold_sample.py` — sample ~80 SPT borings, render pages to `gold/render/`
+   (gitignored), write `gold/manifest.json`. Deterministic (seed).
+2. Transcribe truth into `gold/labels.jsonl` (one record/boring; per-row `n_flag` ∈
+   ok/med/lo/unclear/refusal — only ok/med count toward N accuracy).
+3. `python scripts/gold_score.py` — score OCR vs gold → `gold/scores.json` + `GOLD_VALIDATION.md`.
+4. `python -m ml.train3d --folds 5 --dump-preds` (+ `--physics`) → `data/ml/preds_b{1,2}.json`
+   (gitignored), then `python scripts/gold_diag.py` — data-noise-vs-model-ceiling verdict.
+
+Headline finding: OCR SPT-N has ~50% interval recall and ~64% value accuracy; the B1/B2 vs-baseline
+gap is **substantially OCR label noise**, not a model ceiling (both models predict gold truth
+*better* than the OCR labels they were scored against). See `GOLD_VALIDATION.md`.
+
 ## Tests
 
 Run with the venv from the repo root. Each smoke test **skips cleanly (exit 0)** when `soilbot_rs`
