@@ -269,10 +269,10 @@ def _spt_from_blows(blows_text: str, band_text: str) -> tuple[Optional[int], str
 def _norm_sid(sid: str) -> str:
     """Normalize a sample id to letter+digits, mapping a leading OCR-confused digit to 'S' (the
     dominant split-spoon prefix): '5-1'->'S1', '8-3'->'S3', 'S-4'->'S4', 'J8'->'J8'."""
-    s = sid.replace("-", "")
-    if s and s[0].isdigit():
-        s = "S" + s
-    return s
+    s = sid.strip()
+    if s and s[0].isdigit():          # leading 'S' misread as a digit -> restore it
+        s = "S" + s[1:]
+    return s.replace("-", "")
 
 
 def parse_spoon_format(boxes: list[tuple], w: float, h: float) -> tuple[list[StrataRow], dict]:
@@ -312,9 +312,11 @@ def parse_spoon_format(boxes: list[tuple], w: float, h: float) -> tuple[list[Str
                          if 0.24 * w < b[0] < 0.36 * w and v < 100], key=lambda z: z[0])
         top = depths[0][1] * to_ft if depths else None
         bot = depths[1][1] * to_ft if len(depths) > 1 else None
-        # blows: the 'Blows on Spoon' column (exclude recovery at x>0.53w); WOR/refusal aware
+        # blows: the 'Blows on Spoon' column (exclude recovery at x>0.54w); WOR/refusal aware.
+        # Left edge 0.35w (not 0.37) — the first 6in increment often sits just right of the depth
+        # column and was being dropped, biasing N low (single-increment errors).
         blows_text = " ".join(b[2] for b in sorted(band, key=lambda b: b[0])
-                              if 0.37 * w < b[0] < 0.53 * w)
+                              if 0.35 * w < b[0] < 0.54 * w)
         spt, spt_kind = _spt_from_blows(blows_text, band_text)
         desc = " ".join(b[2] for b in sorted(band, key=lambda b: b[0]) if b[0] > 0.57 * w)
         fam, fam_conf = soil_family_from_text(desc)

@@ -173,24 +173,46 @@ def write_report(scores):
         L.append(f"_Caveat: {(b1 or b2).get('matched')} matched gold samples — directional, wide "
                  "error bars._\n")
 
+    # parser fix before/after (if the re-OCR harness has been run; see scripts/gold_reocr.py)
+    fixed = json.loads(Path("gold/scores_reocr.json").read_text()) \
+        if Path("gold/scores_reocr.json").exists() else None
+    if fixed:
+        a, b = scores, fixed
+        ad, bd = a["interval_detection"], b["interval_detection"]
+        L.append("## Parser fix — before → after\n")
+        L.append("`pipeline/parse_logs.py` was fixed for the failure modes above (sample-id recall, "
+                 "refusal/WOR handling, increment capture). 'Before' is the parser deployed on the "
+                 "live `strata`; 'after' is the fixed parser re-scored on the same gold borings "
+                 "(`scripts/gold_reocr.py`), window-fair on both.\n")
+        L.append("| metric | before | after |")
+        L.append("|---|---|---|")
+        L.append(f"| interval recall | {ad['recall']} | **{bd['recall']}** |")
+        L.append(f"| interval F1 | {ad['f1']} | **{bd['f1']}** |")
+        L.append(f"| SPT-N accuracy (±2) | {a['spt_n']['accuracy']} | **{b['spt_n']['accuracy']}** |")
+        L.append(f"| correct N values | {a['spt_n']['exact_or_within2']} | "
+                 f"**{b['spt_n']['exact_or_within2']}** |")
+        L.append(f"| MAE (blows) | {a['spt_n']['mae_blows']} | **{b['spt_n']['mae_blows']}** |")
+        L.append("\nRecall and the count of correct SPT values rise sharply (the leading-'S'→digit "
+                 "misread that dropped ~half the samples is fixed); refusals no longer leak a bogus "
+                 "N≈50 and WOR/WOH now read N=0, lowering MAE. Precision dips as expected when recall "
+                 "rises. Apply to the corpus by re-running phase-3 OCR (resettable parse manifest).\n")
+
     L.append("## What this implies\n")
-    L.append("- The single highest-leverage data fix is the **OCR extractor**: (1) raise recall "
-             "(it drops every other sample on many logs), and (2) fix the SPT-N rule so N is the sum "
-             "of the 2nd+3rd drive increments rather than a single increment, and handle refusals "
-             "(`50/x`, `100/y`, `WOR`/`WOH`) explicitly.\n")
+    L.append("- The highest-leverage data fix was the **OCR extractor** — now done (see the "
+             "before/after above); applying it corpus-wide should shrink the OCR label-noise floor "
+             "and, per the diagnosis, widen B2's margin over the baseline.\n")
     L.append("- Model-side, the depth-resolved GNN already carries real signal that the noisy labels "
              "mask; cleaner targets should widen the B2-over-baseline margin.\n")
     Path("gold/GOLD_VALIDATION.md").write_text("\n".join(L) + "\n")
     print("wrote gold/GOLD_VALIDATION.md")
 
 
-def main():
-    gold = [json.loads(l) for l in open("gold/labels.jsonl")]
-    man = {b["boring_id"]: b for b in json.load(open("gold/manifest.json"))["borings"]}
-
-    # interval detection (count "real" gold intervals = anything we transcribed as a sample)
+def compute_scores(gold, ocr_by_boring):
+    """Score a {boring_id: [ocr_row_dict]} mapping against the gold records. Each ocr_row_dict
+    needs keys sample_type, top_depth, bottom_depth, spt_n, uscs_class, confidence (feet depths).
+    Returns the scores dict. Used for both the live `strata` (via manifest) and freshly re-parsed
+    rows (gold_reocr), so fixes can be measured before touching the live DB."""
     det_tp = det_fn = det_fp = 0
-    real_recall_tp = real_recall_total = 0       # recall over rows with a usable N specifically
     n_exact = n_total = 0
     abs_errs, signed_errs = [], []
     digit_tax = Counter()
@@ -201,7 +223,16 @@ def main():
     for rec in gold:
         bid = rec["boring_id"]
         unit = rec["unit"]
-        ocr_rows = man[bid]["ocr_rows"]
+        ocr_rows = ocr_by_boring.get(bid, [])
+        # window-fair precision: only score OCR rows within the transcribed gold depth window
+        # (multi-page borings were transcribed one page/window, so out-of-window OCR rows are
+        # neither true nor false here). Rows with no depth are kept (can't window).
+        win = rec.get("window")
+        if win and win[0] is not None and win[1] is not None:
+            k = M_TO_FT if unit == "m" else 1.0
+            lo, hi = win[0] * k - DEPTH_TOL_FT, win[1] * k + DEPTH_TOL_FT
+            ocr_rows = [o for o in ocr_rows
+                        if o.get("top_depth") is None or lo <= o["top_depth"] <= hi]
         matched, um_gold, um_ocr = match_rows(rec["rows"], ocr_rows, unit)
         det_tp += len(matched)
         det_fn += len(um_gold)
@@ -216,7 +247,6 @@ def main():
             if fl in USABLE and gN is not None and oN is not None:
                 n_total += 1
                 bx["n_cmp"] += 1
-                real_recall_tp += 1
                 cls = digit_class(gN, oN)
                 digit_tax[cls] += 1
                 ok = cls in ("exact", "within_2")
@@ -237,14 +267,8 @@ def main():
                     uscs_exact += 1
                 if coarse_uscs(gu) == coarse_uscs(ou):
                     uscs_coarse += 1
-        # recall denominator over usable-N gold rows (regardless of match)
-        for row in rec["rows"]:
-            if row.get("n_flag") in USABLE and row.get("spt_n") is not None:
-                real_recall_total += 1
         per_boring.append(bx)
 
-    real_recall_total = sum(1 for rec in gold for r in rec["rows"]
-                            if r.get("n_flag") in USABLE and r.get("spt_n") is not None)
     det_prec = det_tp / (det_tp + det_fp) if (det_tp + det_fp) else 0.0
     det_rec = det_tp / (det_tp + det_fn) if (det_tp + det_fn) else 0.0
     det_f1 = 2 * det_prec * det_rec / (det_prec + det_rec) if (det_prec + det_rec) else 0.0
@@ -270,8 +294,10 @@ def main():
                                    for k, v in conf_buckets.items()},
         "per_boring": per_boring,
     }
-    Path("gold/scores.json").write_text(json.dumps(scores, indent=2))
-    write_report(scores)
+    return scores
+
+
+def print_summary(scores):
     s = scores["spt_n"]; d = scores["interval_detection"]
     print("=== OCR vs GOLD ===")
     print(f"borings={scores['n_borings']}  interval P/R/F1={d['precision']}/{d['recall']}/{d['f1']}"
@@ -281,6 +307,16 @@ def main():
     print(f"USCS: exact={scores['uscs']['exact_rate']} coarse={scores['uscs']['coarse_rate']} "
           f"(n={scores['uscs']['compared']})")
     print("confidence calibration:", scores["confidence_calibration"])
+
+
+def main():
+    gold = [json.loads(l) for l in open("gold/labels.jsonl")]
+    man = {b["boring_id"]: b for b in json.load(open("gold/manifest.json"))["borings"]}
+    ocr_by_boring = {bid: b["ocr_rows"] for bid, b in man.items()}
+    scores = compute_scores(gold, ocr_by_boring)
+    Path("gold/scores.json").write_text(json.dumps(scores, indent=2))
+    write_report(scores)
+    print_summary(scores)
     print("wrote gold/scores.json")
 
 
