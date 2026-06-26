@@ -55,19 +55,21 @@ Pipeline (one DuckDB store, phases gate the next):
 | 5 | `python -m pipeline.run --phase 5` | Node features + `edges.parquet` → `REPORT.md` |
 | 6 | `python -m pipeline.run --phase 6` | **GATED** soil-equation engine → `strata_derived` |
 | all | `python -m pipeline.run --phase all` | Default scope: phases 1, 2, 4, 5 (heavy 3 & 6 stay gated) |
-| 7 | *(emerging — not in `run.py`)* | **GATED** OpenAlex lit-review harvest → `lit_*` tables + Obsidian vault |
+| 7 | `python -m pipeline.run --phase 7 [--limit N]` | OpenAlex lit-review harvest → `lit_*` tables + Obsidian vault |
 
 `--use-rust` forces the `soilbot_rs` graph/feature path regardless of config flags. The `--phase`
-argument only accepts `1`–`6` and `all`.
+argument accepts `1`–`7` and `all` (`all` still runs only 1, 2, 4, 5).
 
-**Phase 7 (litreview) — emerging, gated.** Not yet wired into `run.py` (no `--phase 7`); invoke the
-module directly via `pipeline.litreview.run(config, log)` and the `litreview: false` gate
-(`config.yaml`) guards it. It pulls ~40 canonical seed queries from OpenAlex (polite pool via
-`mailto`, **no API key**), expands one citation hop, ranks by `cited_by_count`, and persists to
-`lit_papers` / `lit_citations` (+ JSON metadata cache). Key config (`config.yaml` `litreview:`
-block): `max_papers: 300`, `per_seed: 25`, `hops: 1`, `min_year: 1936`. Outputs split by
-trackability: `litreview/vault` (Obsidian graph) is **committed**, while `litreview/pdfs`,
-`litreview/fulltext`, and `litreview/metadata` are **gitignored**.
+**Phase 7 (litreview).** Wired into `run.py` (`phase7()` → `pipeline.litreview.run`); the
+`litreview: false` gate in `config.yaml` documents it as off-by-default but the harvest itself is
+public and key-free. It pulls ~40 canonical seed queries from OpenAlex (polite pool via `mailto`,
+**no API key**), expands one citation hop, ranks by `cited_by_count`, and persists to `lit_papers`
+/ `lit_citations` (+ JSON metadata cache). Key config (`config.yaml` `litreview:` block):
+`max_papers: 300`, `per_seed: 25`, `hops: 1`, `min_year: 1936`. Downstream: the
+`scripts/lit_swarm.workflow.js` agent swarm ranks properties → `scripts/persist_props.py` →
+`lit_properties`, then `scripts/build_vault.py` writes the vault. Outputs split by trackability:
+`litreview/vault` (Obsidian graph) is **committed**, while `litreview/pdfs`, `litreview/fulltext`,
+and `litreview/metadata` are **gitignored**. See `LITREVIEW_REPORT.md` for the experiment + results.
 
 ML (GPU `device: cuda` in config, CPU fallback). Phase A predicts soil type at labeled points;
 Phase B is depth-resolved SPT-N + USCS.
@@ -82,8 +84,18 @@ Phase B is depth-resolved SPT-N + USCS.
 # Phase B (depth-resolved)
 .venv/bin/python -m ml.train3d --folds 5              # B1 (stress baseline)        -> cv_b1.json
 .venv/bin/python -m ml.train3d --physics --folds 5    # B2 (+ physics inputs)       -> cv_b1_physics.json
+.venv/bin/python -m ml.train3d --geotech --folds 5            # + literature geotech -> cv_b1_geotech.json
+.venv/bin/python -m ml.train3d --physics --geotech --folds 5  # B2 + geotech         -> cv_b1_physics_geotech.json
 .venv/bin/python -m ml.report                         # consolidate -> ML_REPORT.md
 ```
+
+`--geotech` (Phase B) appends the literature-derived USCS-keyed geotech block (PI, fines, LL,
+log₁₀k, K₀, Cr, granular — `ml/geotech_features.py`, the Phase-7 information-gain test carried to
+depth-resolved SPT-N). These are **non-leaky for `spt_n`** (functions of `uscs_class` + reference
+tables, not the blow count) but ARE a function of `uscs_class`, a *secondary* Phase-B target — so
+the **USCS@depth metric is leaky under `--geotech` and must be disregarded**; judge on SPT-N only.
+Unlike the Phase-A null result, geotech gives a small but consistent SPT-N gain (CRPS beats B1/B2
+in 4/5 folds).
 
 ## Reporting & finalization
 
@@ -125,6 +137,8 @@ isn't built or the relevant table is empty — a skip is not a pass, read the ou
 - `tests/smoke_soil.py` — runs the soil engine and asserts physical plausibility (σ'v0 > 0 and
   monotone with depth, φ′/Dr in range, `su_tsf > 0` where non-NULL). Prints `SMOKE OK`.
 - `tests/smoke_b2.py` — B2 leakage guard + Dataset3D coverage + decoder shapes.
+- `tests/smoke_geotech.py` — Phase-B `--geotech` block: distinct from LEAKY/SAFE cols, coverage,
+  combined physics+geo decoder shapes. Needs neither `soilbot_rs` nor `strata_derived`.
 - `tests/smoke_ml.py` — Phase-A model forward/backward + spatial-CV disjointness (synthetic, no DB).
 
 **DB-writing tests + the single-writer lock:** `smoke_soil.py` and `smoke_b2.py` rewrite

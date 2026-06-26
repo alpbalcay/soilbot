@@ -46,6 +46,23 @@ GEO_COLS = ["geo_pi", "geo_fines", "geo_ll", "geo_log10k", "geo_k0", "geo_cr",
 _SURF_FT = 30.0
 
 
+# Per-interval (depth-resolved) variant for Phase B. A single stratum's literature geotech vector,
+# keyed only by its USCS class. Non-leaky w.r.t. spt_n (a function of the USCS label + reference
+# tables, never the measured blow count) — same status as the B2 σ'v0/γ inputs. CAVEAT: it IS a
+# deterministic function of uscs_class, which is a *secondary* Phase-B target, so it leaks the
+# USCS-at-depth head; use it for the SPT-N information-gain test only.
+GEO_SAMPLE_COLS = ["geo_" + p for p in _PROP_ORDER]   # geo_pi, geo_fines, ... geo_granular
+
+
+def interval_geotech(uscs_class) -> "np.ndarray | None":
+    """The 7-value literature geotech vector (in _PROP_ORDER) for one stratum's USCS class, or None
+    when the class is missing/unmappable (caller masks it out)."""
+    cu = _clean_uscs(uscs_class)
+    if cu is None:
+        return None
+    return np.array(USCS_PROPS[cu], dtype=np.float64)
+
+
 def _clean_uscs(u: str) -> str | None:
     if not u:
         return None

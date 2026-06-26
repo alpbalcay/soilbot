@@ -75,6 +75,35 @@ and it did: the *most influential* geotech properties are either already derived
 informationally redundant with geology for soil-type. The genuine non-redundant signal geology can't
 provide remains the **depth-resolved SPT-N** profile (the B1 model), not these aggregates.
 
+## Follow-up — carrying the test to depth-resolved SPT-N (Phase B)
+
+The Phase-A null pointed at its own corollary: the non-redundant signal geology can't provide is the
+**depth-resolved SPT-N** profile. So the same literature properties were re-tested where the analysis
+said they should matter — as per-depth, USCS-keyed inputs to the Phase-B model (`ml.train3d
+--geotech`; the 7-property block PI/fines/LL/log₁₀k/K₀/Cr/granular keyed on each stratum's USCS
+class, `ml/geotech_features.py`). These are **non-leaky for SPT-N** (functions of `uscs_class` +
+reference tables, not the measured blow count — same status as the B2 σ'v0/γ inputs). They *are* a
+function of `uscs_class`, a secondary Phase-B target, so the USCS@depth head is leaky under
+`--geotech` and its metric is disregarded; the headline is SPT-N only.
+
+Spatial-block 5-fold CV, SPT-N (mean over folds):
+
+| model | CRPS | RMSE (blows) | geotech wins |
+|---|--:|--:|:--:|
+| B1 (depth + graph) | 0.5089 | 25.3 | — |
+| B1 + geotech | **0.4897** | **23.9** | **4 / 5 folds** |
+| B2 (+ physics) | 0.4985 | 25.0 | — |
+| B2 + geotech | **0.4929** | **24.7** | **4 / 5 folds** |
+
+**Verdict: a small but consistent gain — not a null.** Adding the literature geotech block improves
+SPT-N CRPS by 0.019 over B1 (≈3.8%) and 0.006 over B2, winning 4 of 5 spatial folds in both cases;
+the smaller margin over B2 is expected, since the B2 physics block (σ'v0, γ) already encodes part of
+the same USCS/stress signal. This is the mirror image of the Phase-A result: the literature-influential
+USCS-keyed properties are *redundant* for soil-type (which geology+SSURGO already pin down) but carry
+genuine *new* information for depth-resolved SPT-N, exactly where the Phase-A analysis predicted the
+non-redundant signal would be. Reproduce: `python -m ml.train3d --geotech --folds 5` and
+`--physics --geotech`; guard with `tests/smoke_geotech.py`.
+
 ## Caveats
 - Influence = raw OpenAlex citation count (not field-normalized); textbooks/blockbusters rank high.
 - OA full text only 20/202; property extraction leaned on abstracts + concept tags.

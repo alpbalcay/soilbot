@@ -17,6 +17,7 @@ from pipeline import db
 from pipeline.config import Config
 
 from .data import Dataset
+from .geotech_features import GEO_SAMPLE_COLS, interval_geotech
 
 # physical sanity bounds (feet / blows) — OCR rows outside these are dropped
 DEPTH_MIN_FT, DEPTH_MAX_FT = 0.0, 200.0
@@ -61,6 +62,13 @@ class Dataset3D:
     phys_cols: list = None                  # the P SAFE_PHYS_COLS, in column order
     phys_mean: list = None                  # per-column standardization mean (present-only)
     phys_std: list = None                   # per-column standardization std
+    # geotech — literature USCS-keyed per-depth inputs (non-leaky for spt_n; geotech_features.py).
+    # Defaulted so old caches still load. Note: leaky for the USCS@depth head (function of uscs).
+    sample_geo: torch.Tensor = None         # [M, Gd] standardized per-depth geotech (0 where missing)
+    sample_geo_mask: torch.Tensor = None    # [M, Gd] 1.0 where the stratum's USCS maps to a class
+    geo_cols: list = None                   # the Gd GEO_SAMPLE_COLS, in column order
+    geo_mean: list = None                   # per-column standardization mean (present-only)
+    geo_std: list = None                    # per-column standardization std
 
     def save(self, path):
         torch.save(self.__dict__, path)
@@ -105,7 +113,7 @@ def build_3d_dataset(config: Config, log=None) -> Dataset3D:
     con.close()
 
     uscs_vocab: dict[str, int] = {}
-    s_node, s_depth, s_spt, s_uscs, s_phys = [], [], [], [], []
+    s_node, s_depth, s_spt, s_uscs, s_phys, s_geo = [], [], [], [], [], []
     dropped = 0
     for row in rows:
         bid, top, spt, uscs = row[0], row[1], row[2], row[3]
@@ -122,6 +130,7 @@ def build_3d_dataset(config: Config, log=None) -> Dataset3D:
         s_spt.append(float(spt) if spt_ok else np.nan)
         s_uscs.append(uscs_vocab[uscs] if uscs is not None else -1)
         s_phys.append(phys)
+        s_geo.append(interval_geotech(uscs))   # 7-vec keyed by USCS class, or None
 
     uscs_classes = [None] * len(uscs_vocab)
     for k, v in uscs_vocab.items():
@@ -150,6 +159,30 @@ def build_3d_dataset(config: Config, log=None) -> Dataset3D:
         phys_cols = list(SAFE_PHYS_COLS)
         n_phys_samples = int(present[:, 0].sum())  # samples with σ'v0 present
 
+    # geotech: standardize the per-depth USCS-keyed properties (present-only) with a presence mask.
+    # Independent of strata_derived — keyed only on the stratum's uscs_class. Unmappable USCS ->
+    # all-zero value + mask 0, so the model degrades to the no-geotech input on those samples.
+    sample_geo = sample_geo_mask = geo_cols = geo_mean = geo_std = None
+    n_geo_samples = 0
+    if any(v is not None for v in s_geo):
+        Gd = len(GEO_SAMPLE_COLS)
+        raw = np.array([[np.nan] * Gd if v is None else list(v) for v in s_geo],
+                       dtype=np.float64).reshape(-1, Gd)
+        present = ~np.isnan(raw)
+        std_arr = np.zeros_like(raw, dtype=np.float32)
+        geo_mean, geo_std = [], []
+        for j in range(Gd):
+            col, pj = raw[:, j], present[:, j]
+            mu = float(col[pj].mean()) if pj.any() else 0.0
+            sd = float(col[pj].std()) if pj.any() else 1.0
+            sd = sd or 1.0
+            geo_mean.append(mu); geo_std.append(sd)
+            std_arr[:, j] = np.where(pj, (np.nan_to_num(col) - mu) / sd, 0.0)
+        sample_geo = torch.tensor(std_arr, dtype=torch.float32)
+        sample_geo_mask = torch.tensor(present.astype(np.float32), dtype=torch.float32)
+        geo_cols = list(GEO_SAMPLE_COLS)
+        n_geo_samples = int(present[:, 0].sum())  # samples with a mappable USCS class
+
     depth = np.asarray(s_depth, dtype=np.float64)
     dmean, dstd = (depth.mean(), depth.std() or 1.0) if len(depth) else (0.0, 1.0)
     spt = np.asarray(s_spt, dtype=np.float64)
@@ -176,12 +209,15 @@ def build_3d_dataset(config: Config, log=None) -> Dataset3D:
         uscs_classes=uscs_classes, depth_mean=float(dmean), depth_std=float(dstd),
         sample_phys=sample_phys, sample_phys_mask=sample_phys_mask,
         phys_cols=phys_cols, phys_mean=phys_mean, phys_std=phys_std,
+        sample_geo=sample_geo, sample_geo_mask=sample_geo_mask,
+        geo_cols=geo_cols, geo_mean=geo_mean, geo_std=geo_std,
     )
     if log:
         log.info("dataset3d_built", samples=len(s_node), dropped_sanity=dropped,
                  with_spt=int((~np.isnan(spt)).sum()), with_uscs=int((np.asarray(s_uscs) >= 0).sum()),
                  borings=len(set(s_node)), gw_borings=len(gw_node), uscs_classes=len(uscs_classes),
                  phys_cols=phys_cols, phys_samples=n_phys_samples,
+                 geo_cols=geo_cols, geo_samples=n_geo_samples,
                  spt_mean=round(float(np.nanmean(spt)), 1) if len(spt) else None)
     return d3
 

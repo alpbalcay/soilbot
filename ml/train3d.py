@@ -45,7 +45,8 @@ def _boring_folds(d3, folds, seed, block_ft):
                              block_size_ft=block_ft, folds=folds, seed=seed)
 
 
-def train_eval(d3, cfg, device, test_fold, val_fold, fold, log=None, physics=False, dump_preds=False):
+def train_eval(d3, cfg, device, test_fold, val_fold, fold, log=None, physics=False, geotech=False,
+               dump_preds=False):
     mlc = cfg["ml"]; tr = mlc["train"]
     x_num = d3.x_num.to(device); x_mask = d3.x_mask.to(device); cat_idx = d3.cat_idx.to(device)
     rel = build_rel_index(d3.edge_index, d3.edge_type, len(EDGE_TYPES), device)
@@ -53,11 +54,19 @@ def train_eval(d3, cfg, device, test_fold, val_fold, fold, log=None, physics=Fal
     s_depth = d3.sample_depth_std.to(device).unsqueeze(1)
     y_spt = d3.y_spt_log.to(device); y_uscs = d3.y_uscs.to(device)
 
-    # B2: non-leaky physics inputs (σ'v0/σv0/γ/CN); only when requested AND present in the dataset.
-    use_phys = bool(physics) and getattr(d3, "sample_phys", None) is not None
-    s_phys = d3.sample_phys.to(device) if use_phys else None
-    s_phys_mask = d3.sample_phys_mask.to(device) if use_phys else None
-    phys_dim = d3.sample_phys.shape[1] if use_phys else 0
+    # Optional per-sample side inputs, both routed through the decoder's phys channel (value+mask):
+    #   physics — non-leaky σ'v0/σv0/γ/CN from strata_derived (B2)
+    #   geotech — literature USCS-keyed PI/fines/LL/k/K0/Cr/granular (non-leaky for spt_n)
+    # They are concatenated into one block; the model only sees the combined phys_dim.
+    blocks, masks = [], []
+    if bool(physics) and getattr(d3, "sample_phys", None) is not None:
+        blocks.append(d3.sample_phys); masks.append(d3.sample_phys_mask)
+    if bool(geotech) and getattr(d3, "sample_geo", None) is not None:
+        blocks.append(d3.sample_geo); masks.append(d3.sample_geo_mask)
+    use_phys = bool(blocks)
+    s_phys = torch.cat(blocks, dim=1).to(device) if use_phys else None
+    s_phys_mask = torch.cat(masks, dim=1).to(device) if use_phys else None
+    phys_dim = s_phys.shape[1] if use_phys else 0
 
     tr_m = (fold != test_fold) & (fold != val_fold)
     te_m = fold == test_fold
@@ -148,9 +157,9 @@ def _evaluate(model, d3, x_num, x_mask, cat_idx, rel, s_node, s_depth, y_spt, y_
     return res
 
 
-def baselines(d3, fold, test_fold, val_fold, physics=False):
-    """Depth-mean SPT (global) and a geology+depth gradient-boosting regressor. When `physics`,
-    the GBM also gets the non-leaky σ'v0/σv0/γ/CN features — a fair foil for the B2 GNN."""
+def baselines(d3, fold, test_fold, val_fold, physics=False, geotech=False):
+    """Depth-mean SPT (global) and a geology+depth gradient-boosting regressor. When `physics`/
+    `geotech`, the GBM also gets those non-leaky per-sample features — a fair foil for the GNN."""
     from sklearn.ensemble import HistGradientBoostingRegressor
     y = d3.y_spt_log.numpy(); valid = y >= 0
     tr = (fold != test_fold) & (fold != val_fold) & valid
@@ -161,42 +170,47 @@ def baselines(d3, fold, test_fold, val_fold, physics=False):
         mu0 = y[tr].mean(); sd0 = y[tr].std() or 1.0
         out["depth_mean"] = ev.regression_metrics(np.full(te.sum(), mu0),
                                                   np.full(te.sum(), sd0), y[te])
-        # geology+depth GBM on node features (no graph) + depth [+ physics for the B2 baseline]
+        # geology+depth GBM on node features (no graph) + depth [+ physics/geotech for the foil]
         nodes = d3.sample_node.numpy()
         feats = [d3.cat_idx.numpy()[nodes].astype(float), d3.x_num.numpy()[nodes],
                  d3.sample_depth_std.numpy()[:, None]]
         use_phys = bool(physics) and getattr(d3, "sample_phys", None) is not None
+        use_geo = bool(geotech) and getattr(d3, "sample_geo", None) is not None
+        parts = ["geology", "depth"]
         if use_phys:
-            feats += [d3.sample_phys.numpy(), d3.sample_phys_mask.numpy()]
+            feats += [d3.sample_phys.numpy(), d3.sample_phys_mask.numpy()]; parts.append("phys")
+        if use_geo:
+            feats += [d3.sample_geo.numpy(), d3.sample_geo_mask.numpy()]; parts.append("geo")
         X = np.concatenate(feats, axis=1)
         gbm = HistGradientBoostingRegressor(max_iter=300, random_state=0)
         gbm.fit(X[tr], y[tr]); pred = gbm.predict(X[te])
         sd = (y[tr] - gbm.predict(X[tr])).std() or 1.0
-        name = "geology_depth_phys_gbm" if use_phys else "geology_depth_gbm"
-        out[name] = ev.regression_metrics(pred, np.full(te.sum(), sd), y[te])
+        out["_".join(parts) + "_gbm"] = ev.regression_metrics(pred, np.full(te.sum(), sd), y[te])
     return out
 
 
-def run(cfg, log, folds=5, physics=None, dump_preds=False):
+def run(cfg, log, folds=5, physics=None, geotech=False, dump_preds=False):
     device = _device(cfg)
     out = cfg.abspath(cfg.get("ml", "out_dir", default="data/ml"))
     d3 = Dataset3D.load(out / "dataset3d.pt")
     if physics is None:
         physics = bool(cfg.get("ml", "b1", "physics_features", default=False))
     physics = physics and getattr(d3, "sample_phys", None) is not None
-    tag = "b2" if physics else "b1"
+    geotech = bool(geotech) and getattr(d3, "sample_geo", None) is not None
+    tag = ("b2" if physics else "b1") + ("g" if geotech else "")
     seed = int(cfg.get("ml", "seed", default=1337)); torch.manual_seed(seed); np.random.seed(seed)
     block_ft = float(cfg.get("ml", "splits", "block_size_ft", default=20000))
     fold = _boring_folds(d3, folds, seed, block_ft)
-    log.info(f"{tag}_start", device=device, samples=int(len(fold)), physics=physics,
-             phys_cols=getattr(d3, "phys_cols", None),
+    log.info(f"{tag}_start", device=device, samples=int(len(fold)), physics=physics, geotech=geotech,
+             phys_cols=getattr(d3, "phys_cols", None), geo_cols=getattr(d3, "geo_cols", None),
              with_spt=int((d3.y_spt_log.numpy() >= 0).sum()), folds=folds)
 
     model_res, base_res, all_preds = [], [], []
     for tf in range(folds):
         vf = (tf + 1) % folds; t0 = time.time()
-        r = train_eval(d3, cfg, device, tf, vf, fold, log, physics=physics, dump_preds=dump_preds)
-        b = baselines(d3, fold, tf, vf, physics=physics)
+        r = train_eval(d3, cfg, device, tf, vf, fold, log, physics=physics, geotech=geotech,
+                       dump_preds=dump_preds)
+        b = baselines(d3, fold, tf, vf, physics=physics, geotech=geotech)
         if dump_preds and "_preds" in r:
             p = r.pop("_preds"); p["fold"] = [tf] * len(p["boring_id"]); all_preds.append(p)
         model_res.append(r); base_res.append(b)
@@ -209,26 +223,30 @@ def run(cfg, log, folds=5, physics=None, dump_preds=False):
 
     agg = _agg(model_res)
     agg_b = {}
-    for k in ("depth_mean", "geology_depth_gbm", "geology_depth_phys_gbm"):
+    for k in {kk for b in base_res for kk in b}:  # union of baseline names seen across folds
         dicts = [b[k] for b in base_res if k in b]
         if dicts:
             agg_b[k] = {kk: float(np.nanmean([d[kk] for d in dicts])) for kk in dicts[0]}
-    fname = "cv_b1_physics.json" if physics else "cv_b1.json"
-    (out / fname).write_text(json.dumps(
-        {"model": {"folds": model_res, "mean": agg}, "baselines": agg_b, "physics": physics},
-        indent=2))
+    base = "cv_b1_physics" if physics else "cv_b1"
+    if geotech:
+        base += "_geotech"
+    (out / f"{base}.json").write_text(json.dumps(
+        {"model": {"folds": model_res, "mean": agg}, "baselines": agg_b,
+         "physics": physics, "geotech": geotech}, indent=2))
     if dump_preds and all_preds:
-        # concatenate fold OOF predictions -> preds_b{1,2}.json (gitignored; for gold_diag).
+        # concatenate fold OOF predictions -> preds_b{1,2}[_geotech].json (gitignored; gold_diag).
         # columnar JSON keeps this dependency-free (no pandas/pyarrow in this env).
         cols = {}
         for p in all_preds:
             for k, v in p.items():
                 cols.setdefault(k, []).extend(np.asarray(v).tolist())
-        pname = "preds_b2.json" if physics else "preds_b1.json"
-        (out / pname).write_text(json.dumps(cols))
-        log.info(f"{tag}_preds", rows=len(cols["boring_id"]), file=pname)
+        pbase = "preds_b2" if physics else "preds_b1"
+        if geotech:
+            pbase += "_geotech"
+        (out / f"{pbase}.json").write_text(json.dumps(cols))
+        log.info(f"{tag}_preds", rows=len(cols["boring_id"]), file=f"{pbase}.json")
     log.info(f"{tag}_done", **{f"spt_{k}": round(v, 4) for k, v in agg.get("spt", {}).items()})
-    return {"model": agg, "baselines": agg_b, "physics": physics}
+    return {"model": agg, "baselines": agg_b, "physics": physics, "geotech": geotech}
 
 
 def _agg(res_list):
@@ -244,18 +262,23 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--physics", action="store_true",
                     help="B2: add non-leaky σ'v0/σv0/γ/CN per-sample inputs (-> cv_b1_physics.json)")
+    ap.add_argument("--geotech", action="store_true",
+                    help="add literature USCS-keyed geotech inputs (PI/fines/LL/k/K0/Cr/granular); "
+                         "non-leaky for SPT-N, but leaks the USCS@depth head (-> *_geotech.json)")
     ap.add_argument("--dump-preds", action="store_true",
                     help="also write per-sample OOF predictions to preds_b{1,2}.parquet (gold diag)")
     args = ap.parse_args()
     cfg = Config.load(None); rid = new_run_id()
     logger = setup(cfg.path("log_dir"), "ml.log", rid, "train3d", console=True)
     res = run(cfg, logger, folds=args.folds, physics=True if args.physics else None,
-              dump_preds=args.dump_preds)
+              geotech=args.geotech, dump_preds=args.dump_preds)
     s = res["model"].get("spt", {}); u = res["model"].get("uscs", {})
-    print(f"\n=== {'B2 (+physics)' if res.get('physics') else 'B1'} 3D depth-resolved (spatial CV) ===")
+    label = ("B2 (+physics)" if res.get("physics") else "B1") + (" +geotech" if res.get("geotech") else "")
+    print(f"\n=== {label} 3D depth-resolved (spatial CV) ===")
     print(f"  SPT-N: CRPS={s.get('crps',float('nan')):.3f} cov90={s.get('cov90',float('nan')):.3f} "
           f"RMSE={s.get('rmse_blows',float('nan')):.1f} MAE={s.get('mae_blows',float('nan')):.1f} blows (n={s.get('n','?')})")
-    print(f"  USCS@depth: macroF1={u.get('macro_f1',float('nan')):.3f} acc={u.get('accuracy',float('nan')):.3f}")
+    uscs_note = "  (leaky under --geotech; ignore)" if res.get("geotech") else ""
+    print(f"  USCS@depth: macroF1={u.get('macro_f1',float('nan')):.3f} acc={u.get('accuracy',float('nan')):.3f}{uscs_note}")
     for name, sp in res["baselines"].items():
         print(f"  baseline {name:18}: CRPS={sp.get('crps',float('nan')):.3f} "
               f"cov90={sp.get('cov90',float('nan')):.3f} RMSE(log)={sp.get('rmse',float('nan')):.3f}")
