@@ -42,3 +42,9 @@ gold/render/
 gold/ocr_cache/
 
 # Generated reports are kept in-repo intentionally (schema_audit.md, REPORT.md)
+
+# OCR box cache (re-parse without re-OCR; regenerable)
+data/ocr_cache/
+
+# Generated dashboard output (regenerate via scripts/data_report.py)
+data_report.html
