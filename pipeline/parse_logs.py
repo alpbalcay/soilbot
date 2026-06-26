@@ -179,7 +179,9 @@ def soil_family_from_text(desc: str) -> tuple[Optional[str], float]:
     if "PEAT" in up or "MUCK" in up:
         return "PT", 0.6
     # descriptive cues for the suffix/prefix the base heuristic used to drop
-    high_plast = "FAT" in up or "HIGH PLAST" in up or "HIGH-PLAST" in up or "PLASTIC CLAY" in up
+    # require "FAT CLAY" adjacency, not bare "FAT" — OCR garbles the "presented in good faith"
+    # boilerplate to "good fatth"/"fat", which would otherwise spuriously flag high plasticity.
+    high_plast = "FAT CLAY" in up or "HIGH PLAST" in up or "HIGH-PLAST" in up or "PLASTIC CLAY" in up
     organic = "ORGANIC" in up
     well_graded = "WELL GRADED" in up or "WELL-GRADED" in up
     if "TOPSOIL" in up:
