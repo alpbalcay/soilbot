@@ -108,12 +108,15 @@ Optional helpers, run from the repo root:
   until the parse count stabilizes, rebuilds the 3D dataset on the full corpus, then runs the final
   5-fold B1; logs to `logs/finish_progress.out` / `logs/finish_ocr.out`. (Contrast
   `scripts/auto_phase6_b2.sh`, the detached watcher below.)
+- `bash run_reocr.sh` — full-corpus **re-OCR** with box caching (resumable; `ocr_parallel.py` skips
+  done/failed via the manifest), then `scripts/classify_audit.py`; logs to `logs/reocr_progress.out`
+  / `logs/reocr_chunk.out`. Use after an OCR-parser change to rebuild `strata` from scratch.
 
 ### OCR gold-set validation (`gold/`)
 
 Independent ground truth for the OCR'd `strata` SPT-N, hand-transcribed from rendered boring-log
-PDFs. The committed artifacts (`gold/labels.jsonl`, `manifest.json`, `scores.json`, `diag.json`,
-`GOLD_VALIDATION.md`) and the pipeline:
+PDFs. The committed artifacts (`gold/labels.jsonl`, `manifest.json`, `scores.json`,
+`scores_reocr.json`, `diag.json`, `GOLD_VALIDATION.md`) and the pipeline:
 
 1. `python scripts/gold_sample.py` — sample ~80 SPT borings, render pages to `gold/render/`
    (gitignored), write `gold/manifest.json`. Deterministic (seed).
@@ -123,9 +126,19 @@ PDFs. The committed artifacts (`gold/labels.jsonl`, `manifest.json`, `scores.jso
 4. `python -m ml.train3d --folds 5 --dump-preds` (+ `--physics`) → `data/ml/preds_b{1,2}.json`
    (gitignored), then `python scripts/gold_diag.py` — data-noise-vs-model-ceiling verdict.
 
-Headline finding: OCR SPT-N has ~50% interval recall and ~64% value accuracy; the B1/B2 vs-baseline
-gap is **substantially OCR label noise**, not a model ceiling (both models predict gold truth
-*better* than the OCR labels they were scored against). See `GOLD_VALIDATION.md`.
+**Fast OCR-parser iteration** (decouples parser fixes from GPU OCR cost):
+
+- `python scripts/gold_reocr.py build` — OCR the 80 gold PDFs **once**, caching positioned boxes to
+  `gold/ocr_cache/<boring_id>.json` (gitignored; ~minutes on GPU).
+- `python scripts/gold_reocr.py score` — re-run the current pure-Python parser on the cache + score
+  vs gold → `gold/scores_reocr.json` (instant, no GPU). **When you change the OCR parser
+  (`pipeline/parse_logs.py`), re-validate with `gold_reocr.py score`, not a full re-OCR.** Default
+  mode is `score`.
+
+Headline finding: after the OCR-parser fix, gold interval recall ~79% / F1 ~0.76 (was ~48% / ~0.62);
+SPT-N value accuracy ~68%. The B1/B2 vs-baseline gap is **substantially OCR label noise**, not a
+model ceiling (both models predict gold truth *better* than the OCR labels they were scored
+against). See `GOLD_VALIDATION.md` for the before→after table and the current verdict.
 
 ## Tests
 
@@ -183,6 +196,8 @@ SOILBOT_DB=/tmp/snap.duckdb .venv/bin/python tests/smoke_soil.py
 - `data/`, `logs/`, and `.claude/` are gitignored — build/run artifacts (DuckDB, parquet, `.pt`
   caches, ML JSONs) stay local and are never committed. Phase 7 follows the same rule: only
   `litreview/vault` (the Obsidian graph) is committed; `litreview/{pdfs,fulltext,metadata}` are not.
+  The OCR box caches `gold/ocr_cache/` and `data/ocr_cache/` are likewise gitignored — regenerate
+  via `scripts/gold_reocr.py build` / `run_reocr.sh`.
 - **Don't `git push`** unless explicitly asked. Commit to `main` with the repo's terse one-line
   message style.
 - `scripts/auto_phase6_b2.sh` is a detached, idempotent watcher that re-runs phase 6 + B1/B2 +
