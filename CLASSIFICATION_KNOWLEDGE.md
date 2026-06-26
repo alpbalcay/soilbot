@@ -5,7 +5,19 @@ properties are influential" but "what does the classification literature tell us
 soil-classification data." 46 classification-relevant papers, 11 with usable content, 32 extracted
 rules, synthesized into prioritized actions and applied to our `strata` table.*
 
-## Headline finding — our USCS distribution is a parser artifact, and the literature proves it
+> **UPDATE (after the re-OCR test).** The hypothesis below — that the degenerate USCS distribution
+> was a *parser artifact* recoverable by a better heuristic — was **tested and largely disproven**.
+> We fixed `soil_family_from_text` to emit W/H/O classes, re-OCR'd the full corpus (caching every
+> log's boxes), and re-parsed. The previously-missing classes barely moved: **CH 1→2, and MH/SW/GW/OH
+> still 0.** The reason, found by reading the cached OCR text: NJDOT descriptive logs contain **zero**
+> "well/poorly graded" gradation language and **no genuine "fat clay"** (the "FAT" hits were OCR
+> garble of the "good faith" boilerplate). So the absent classes are a **DATA limitation** — the logs
+> never recorded the gradation/plasticity that distinguishes them — **not** a parser artifact. The one
+> real correction the fix delivered: **organic soils PT→OL** (the old heuristic mislabelled all
+> "organic" as peat; **PT 7,346→744, OL 484→5,684**, ~5,200 intervals corrected from peat to organic
+> silt). See "Re-OCR outcome" at the end. The original (pre-test) analysis is kept below for the record.
+
+## Headline finding (original hypothesis — see UPDATE above) — degenerate USCS distribution
 
 Our 116,142 USCS-labelled intervals contain **only 12 tokens**, and the distribution is
 geologically impossible:
@@ -98,8 +110,30 @@ inferred. What is *fixable today* is flagging (`strata_quality`) and the groundw
 invent the gradation/Atterberg that distinguishes the collapsed classes. No classes were rewritten —
 that would fabricate measurements we never made.
 
+## Re-OCR outcome (empirical test of the hypothesis)
+We implemented the parser fix (`soil_family_from_text` now reads gradation/plasticity/organic cues),
+added an **OCR box cache** so parser changes re-apply without re-OCR (`extract_with_easyocr` →
+`data/ocr_cache/`, replayed by `scripts/reparse_cache.py`), re-OCR'd all 49,151 logs (~18 h, caching
+42,553 logs' boxes), and re-parsed. Distribution, old (`strata_backup`) → new:
+
+| class | old | new | Δ | note |
+|---|--:|--:|--:|---|
+| OL (organic silt) | 484 | **5,684** | **+5,200** | real fix: organic was mislabelled peat |
+| PT (peat) | 7,346 | **744** | **−6,602** | correctly reserved for true peat/muck |
+| CH | 1 | 2 | +1 | ~no high-plasticity clay stated in logs |
+| MH / SW / GW / OH | 0 | **0** | 0 | gradation/plasticity never recorded → unrecoverable |
+| ML / SP / GP / CL / SM (bulk) | — | — | minor | OCR-run variation; broadly stable |
+
+**Verdict.** The W/H/O classes did **not** recover (data limitation, confirmed). The genuine win is
+the **PT→OL** correction (~5,200 intervals) plus a **durable OCR box cache**: the final re-parse ran
+in **seconds** instead of 18 h, so any future parser improvement is now instant
+(`python scripts/reparse_cache.py`). `strata_backup` retains the pre-test data; `strata_derived` is
+now stale and would need a re-derive.
+
 ## Reproduce
 ```
 # swarm: Workflow scripts/classification_swarm.workflow.js  (args = our USCS distribution)
 python scripts/classify_audit.py     # -> strata_quality flag table + summary counts
+python -m pipeline.run --phase 3 --download-logs --ocr   # (or scripts/ocr_parallel.py) caches boxes
+python scripts/reparse_cache.py      # re-apply parser fixes from cache in seconds (no re-OCR)
 ```
